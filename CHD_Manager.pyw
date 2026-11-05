@@ -46,7 +46,7 @@ SETTINGS_FILE = HERE / "chd_manager_settings.json"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -3750,7 +3750,7 @@ def find_base_pbp(saved=""):
     return None
 
 
-PATH_SETTINGS = ("chdman", "base_pbp", "art_dir", "out_dir", "dolphintool", "last_dir")
+PATH_SETTINGS = ("chdman", "base_pbp", "art_dir", "out_dir", "dolphintool", "rpcs3", "last_dir")
 
 
 def relocate_settings(settings, here=None):
@@ -4311,6 +4311,7 @@ class Job:
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
+        self.pkgs = []                 # a PS3 package (container 'ps3pkg'): its header info, with the game's other packages (updates) added to it
         self.split_stem = ""           # a PS3 image kept in pieces (container 'ps3parts'): its name without '.iso' and the piece number
         self.ps3_info = {}             # its game ID, title, region and whether its protected parts are still encrypted
         self.warn = ""                 # something to tell the person when the item is added (it still works as far as it can)
@@ -4385,6 +4386,8 @@ class Job:
             return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
         if self.container == "ps3folder":           # a PS3 game folder: a disc image of it (RPCS3 loads those), or a CHD of one
             return [(k, target_label(k)) for k in ("iso", "chd")]
+        if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
+            return [("folder", target_label("folder"))]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
         if self.ps3:                                # a PS3 disc image: a CHD of it, or its files (not while they are still encrypted)
@@ -4473,6 +4476,8 @@ class Job:
         ext = self.path.suffix.lower()
         if self.ps3_info:
             return self.ps3_info.get("id", "")
+        if self.pkgs:
+            return self.pkgs[0]["title_id"]
         if self.container == "disc":
             return self.disc_info.get("id", "")
         try:
@@ -4515,6 +4520,16 @@ class Job:
             if info["encrypted"]:
                 self.warn = ("this PS3 disc image is still encrypted, so its files can't be unpacked until it has been decrypted with your own "
                              "disc key. It can still be joined into one ISO, or become a CHD, which store it exactly as it is")
+            return
+        if ext == ".pkg" and not p.is_dir():
+            info = pkg_info(p)
+            self.container, self.platform, self.types = "ps3pkg", "PS3", ["MODE1"]
+            self.pkgs = [info]
+            self.size, self.src_files = info["size"], [p]
+            self.auto_type = "DVD"
+            self.reason = "PS3 update package" if info["patch"] else "PS3 game package"
+            if not RPCS3[0]:
+                self.warn = ("it needs your own RPCS3 to be unpacked, and none is set up yet (Settings, Formats, PlayStation 3: show it where rpcs3.exe is)")
             return
         if p.is_dir():
             info = ps3_folder_info(p)
@@ -4675,8 +4690,19 @@ class Job:
             return self.type + ("*" if self.override != "Auto" else "")
         return self.disc or self.type
 
+    def add_pkg(self, other):
+        """Another package of the same game (a base and its updates are installed in that order, as on a console) joins this item."""
+        self.pkgs += other.pkgs
+        self.pkgs.sort(key=lambda i: (i["patch"], i["version"], i["path"].name.lower()))
+        self.src_files = [i["path"] for i in self.pkgs]
+        self.path = self.home = self.src_files[0]
+        self.size = sum(i["size"] for i in self.pkgs)
+        kinds = sum(1 for i in self.pkgs if i["patch"])
+        self.reason = "PS3 game package" + (f" with {kinds} update{'s' if kinds != 1 else ''}" if kinds else "")
+        self._raw = None
+
     def row(self):
-        name = self.path.name + (f"  (+{len(self.src_files) - 1} more)" if self.container == "ps3parts" and len(self.src_files) > 1 else "")
+        name = self.path.name + (f"  (+{len(self.src_files) - 1} more)" if self.container in ("ps3parts", "ps3pkg") and len(self.src_files) > 1 else "")
         return (name, self.action_label(), self.platform, self.type_label(),
                 fmt_size(self.size), self.status, self.result, str(self.path.parent))
 
@@ -5611,6 +5637,82 @@ def is_iso9660(path):
         return False
 
 
+# ---- PlayStation 3 packages (.pkg). Only the plain header is read here; the contents are opened by the user's own RPCS3, which holds
+# whatever it needs for that. Nothing in this program decrypts a package.
+RPCS3 = [""]                                   # the user's rpcs3.exe, when there is one
+PKG_CONTENT = {4: "game data", 5: "game"}
+PKG_OTHER = {9: "a theme", 11: "a widget", 13: "a licence file"}   # other kinds are named by their number
+
+
+def pkg_info(path):
+    """The plain header of a PS3 package -> {'path', 'content_id', 'title_id', 'size', 'files', 'patch', 'version', 'content_type'}.
+    Raises ValueError with a plain sentence when the file is not a PS3 game package (or is cut short)."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        d = f.read(0x400)
+    size = path.stat().st_size
+    if len(d) < 0xC0 or d[:4] != b"\x7fPKG":
+        raise ValueError("this isn't a PlayStation package (it doesn't start like one)")
+    typ, plat, moff, mcnt, _msz, files, psz = struct.unpack(">HHIIIIQ", d[4:0x20])
+    if plat != 1:
+        raise ValueError("this is a package for a different PlayStation (a PSP or Vita one); only PlayStation 3 packages can be unpacked")
+    if psz != size:
+        raise ValueError("this package is damaged or cut short (the file isn't the size its header says); download it again")
+    info = {"path": path, "size": size, "files": files, "patch": False, "version": 0, "content_type": 0,
+            "content_id": d[0x30:0x54].split(b"\0")[0].decode("ascii", "replace")}
+    off = moff
+    for _ in range(min(mcnt, 32)):
+        if off + 8 > len(d):
+            break
+        pid, ln = struct.unpack(">II", d[off:off + 8])
+        body = d[off + 8:off + 8 + ln]
+        if pid == 2 and ln >= 4:
+            info["content_type"] = struct.unpack(">I", body[:4])[0]
+        elif pid == 3 and ln >= 4:
+            info["patch"] = bool(struct.unpack(">I", body[:4])[0] & 0x10)
+        elif pid == 8 and ln >= 8:
+            info["version"] = struct.unpack(">H", body[6:8])[0]
+        off += 8 + ln
+    cid = info["content_id"]
+    info["title_id"] = cid[7:16] if len(cid) >= 16 and cid[6] == "-" else cid
+    if info["content_type"] not in PKG_CONTENT:
+        what = PKG_OTHER.get(info["content_type"], f"a kind of package (type {info['content_type']})")
+        raise ValueError(f"this package holds {what}, not a PlayStation 3 game or its update, so there is no game folder to unpack")
+    return info
+
+
+def find_rpcs3(configured=""):
+    """The user's rpcs3.exe: the path set in Settings, or next to this program. Nothing else is searched."""
+    cands = [Path(configured)] if configured else []
+    cands += [HERE / "rpcs3.exe", HERE / "rpcs3" / "rpcs3.exe", HERE / "RPCS3" / "rpcs3.exe"]
+    if os.name != "nt":                         # this way of using RPCS3 needs its Windows program folder
+        return ""
+    for c in cands:
+        try:
+            if c.is_file():
+                return str(c)
+        except OSError:
+            pass
+    return ""
+
+
+def rpcs3_workdir(exe, work):
+    """A throwaway copy of RPCS3's program files (nothing of the user's games, settings or library) in the folder work, so an install
+    there leaves the real RPCS3 untouched. Files are linked where the drive allows it, else copied."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "log").mkdir(exist_ok=True)         # RPCS3 won't make its log folder itself, and then it has no log to say what it did
+    src = Path(exe).parent
+    for f in sorted(src.iterdir()):
+        if f.is_file() and (f.suffix.lower() == ".dll" or f.name.lower() == "rpcs3.exe"):
+            dst = work / f.name
+            try:
+                os.link(f, dst)
+            except OSError:
+                shutil.copy2(f, dst)
+    return work / "rpcs3.exe"
+
+
 # ---- writing a disc image
 class _P3Node:
     __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num", "stamp", "skey")
@@ -6204,7 +6306,7 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder")}
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",)}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
@@ -6397,7 +6499,7 @@ DEFAULTS = {
     "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
-    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
+    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
 }
 
 
@@ -6701,7 +6803,7 @@ class App:
         for key in ("compression", "custom_comp", "hunk", "threads", "verify_after", "low_priority", "delete_src", "delete_forever",
                     "exists", "out_mode", "out_dir", "auto_suggest"):
             self.v[key].trace_add("write", lambda *a: self.refresh_summary())
-        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub"):
+        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3"):
             self.v[key].trace_add("write", lambda *a: self.refresh_wii())
         self.style_widgets()
         self.refresh_summary()
@@ -6831,12 +6933,20 @@ class App:
         self.wii_status = ttk.Label(g3, text="", style="Muted.TLabel", wraplength=560, justify="left")
         self.wii_status.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
-        g4 = ttk.LabelFrame(f, text=" PlayStation 3 (game folder ↔ ISO) ", padding=10)
+        g4 = ttk.LabelFrame(f, text=" PlayStation 3 (game folder ↔ ISO, .pkg packages) ", padding=10)
         g4.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Checkbutton(g4, text="Split ISOs of more than 4 GB into .iso.0, .iso.1 … parts (only for FAT32 drives on a real PS3; leave off for RPCS3)",
                         variable=v["ps3_split"]).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(g4, text="Keep the PS3_UPDATE folder when making an ISO (a system update on real discs; no emulator uses it)",
                         variable=v["ps3_update"]).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), CHD Manager uses your own RPCS3 and contains no keys.\n"
+                           "Show it where rpcs3.exe is (your RPCS3 and its games are never changed):").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        pr = ttk.Frame(g4)
+        pr.grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(pr, textvariable=v["rpcs3"], width=44).grid(row=0, column=0)
+        ttk.Button(pr, text="Browse…", command=self.pick_rpcs3).grid(row=0, column=1, padx=4)
+        self.rpcs3_status = ttk.Label(g4, text="", style="Muted.TLabel", wraplength=560, justify="left")
+        self.rpcs3_status.grid(row=4, column=0, sticky="w", pady=(4, 0))
 
         # --- Output
         f = tab("Output")
@@ -7652,7 +7762,7 @@ class App:
     def add_files_dialog(self):
         files = filedialog.askopenfilenames(
             title="Select disc images or CHD files", initialdir=self.settings.get("last_dir") or None,
-            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.zar *.mds *.nrg *.ccd *.img *.m3u *.chd"), ("All files", "*.*")])
+            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.zar *.mds *.nrg *.ccd *.img *.m3u *.chd *.pkg"), ("All files", "*.*")])
         if files:
             self.settings["last_dir"] = str(Path(files[0]).parent)
             self.add_paths(files)
@@ -7814,6 +7924,7 @@ class App:
             else:
                 jobs_from.append((f, root, None, None))
         have = {str(j.path).lower() for j in self.jobs}
+        have |= {str(x).lower() for j in self.jobs if j.container == "ps3pkg" for x in j.src_files}
         listed = set(have)
         was_empty = not self.jobs
         added = 0
@@ -7832,6 +7943,21 @@ class App:
             if arc:
                 job.archive, job.extract_dir, job.home, job.src_files = arc, tmp, arc.parent / f.name, [arc]
                 self.arc_dirs[tmp] += 1
+            if job.container == "ps3pkg":
+                mate = next((j for j in self.jobs if j.container == "ps3pkg" and j.pkgs[0]["title_id"] == job.pkgs[0]["title_id"]
+                             and not j.status.startswith("Done")), None)
+                if mate is not None:
+                    twin = next((i for i in mate.pkgs if i["patch"] == job.pkgs[0]["patch"] and i["version"] == job.pkgs[0]["version"]), None)
+                    if twin is not None:
+                        self.refuse(f.name, sentence(f"it is the same {'update' if twin['patch'] else 'game package'} as {twin['path'].name}, which is already in the list"),
+                                    "warn")
+                        continue
+                    mate.add_pkg(job)
+                    have.add(str(f).lower())
+                    added += 1
+                    self.refresh_job(mate)
+                    self.log(f"{f.name} is for the same game as {mate.pkgs[0]['path'].name}, so they are one item: installed in order, base game first, then its updates.", "info")
+                    continue
             have.add(str(f).lower())
             self.jobs.append(job)
             iid = self.tree.insert("", "end", values=job.row(), tags=("odd" if len(self.tree_ids) % 2 else "even",))
@@ -8051,7 +8177,7 @@ class App:
                     pieces_seen.add(first)
                     found.append(first)
             elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
-                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"):
+                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
                 found.append(f)
@@ -8162,6 +8288,16 @@ class App:
         d = filedialog.askdirectory(title="Folder with one subfolder of artwork per game")
         if d:
             self.v["art_dir"].set(d)
+
+    def pick_rpcs3(self):
+        p = filedialog.askopenfilename(parent=self.settings_win, title="Find RPCS3: choose rpcs3.exe",
+                                       filetypes=[("RPCS3", "rpcs3.exe"), ("All programs", "*.exe")])
+        if p:
+            if Path(p).name.lower() != "rpcs3.exe":
+                messagebox.showerror(APP_NAME, "That isn't rpcs3.exe. Pick rpcs3.exe from your RPCS3 folder.", parent=self.settings_win)
+                return
+            self.v["rpcs3"].set(p)
+            self.save_settings()
 
     def pick_base_pbp(self):
         p = filedialog.askopenfilename(title="Choose a working PlayStation 1 .pbp",
@@ -8466,6 +8602,8 @@ class App:
                      (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
+        if job.container == "ps3pkg":
+            extra = 300 * 1024 * 1024                        # the throwaway copy of RPCS3's program files, if they can't be linked
         out = self.output_path(job, o, SPACE_EXT.get(t, ".x"), make=False).parent
         needs = [(out, final + extra)]
         if t == "ecm" and o["verify_after"]:
@@ -8909,6 +9047,8 @@ class App:
             return self.do_join_ps3(job, o)
         if t == "zar":
             return self.do_to_zar(job, o)
+        if t == "folder" and job.container == "ps3pkg":
+            return self.do_pkg_to_folder(job, o)
         if t == "folder":
             return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
@@ -9302,6 +9442,102 @@ class App:
         if o["delete_src"]:
             self.remove_sources(job, o)
 
+    def do_pkg_to_folder(self, job, o):
+        """PS3 packages (a game, then its updates) -> the game's folder. The packages are installed by the user's own RPCS3 into a throwaway
+        copy of its program files, and the finished game folder is moved out of that copy. The real RPCS3 and its library are not touched."""
+        exe = find_rpcs3(o.get("rpcs3", ""))
+        if not exe:
+            job.status, job.result = "Failed (setup needed)", "this needs your own RPCS3: Settings, Formats, PlayStation 3, and show it where rpcs3.exe is"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        if not any(not i["patch"] for i in job.pkgs):
+            job.status, job.result = "Failed (no game)", "only an update was added. Add the game's own package too (the one that isn't an update)"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        work = out.parent / f".{out.name[:40]}.chdm_rpcs3"
+        shutil.rmtree(work, ignore_errors=True)
+        n = len(job.pkgs)
+        self.post("log", f"\n{job.path.name}  [PS3 package{'s' if n != 1 else ''} → game folder, installed by your RPCS3]", "info")
+        ok = False
+        try:
+            wexe = rpcs3_workdir(exe, work)
+            seen = []
+            for k, info in enumerate(job.pkgs):
+                log = work / "log" / "RPCS3.log"
+                log.unlink(missing_ok=True)
+                cmd = [str(wexe), "--allow-any-location", "--headless", "--installpkg", str(info["path"])]
+                self.post("log", f"Installing {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else ""), "info")
+                si = None
+                if os.name == "nt":                         # RPCS3 crashes at start-up with no console at all, so it gets one that is hidden
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = 0
+                proc = subprocess.Popen(cmd, cwd=str(work), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                        **({"startupinfo": si} if si else {}))
+                self.proc, last, t0 = proc, -1, time.time()
+                while proc.poll() is None:
+                    time.sleep(0.2)
+                    if self.stop_flag:
+                        proc.kill()
+                        raise UnpackError("stopped")
+                    if time.time() - t0 > 3 * 3600:
+                        proc.kill()
+                        raise UnpackError("RPCS3 took far too long to install this package, so it was stopped")
+                    try:
+                        made = log.read_bytes().count(b"PKG: Created file") if log.exists() else 0
+                    except OSError:
+                        made = 0
+                    pct = min(99, int(100 * made / max(1, info["files"])))
+                    if pct != last:
+                        last = pct
+                        job.status = f"Installing {k + 1}/{n} {pct}%" if n > 1 else f"Installing {pct}%"
+                        self.post("job", job)
+                        self.post("progress", (k * 100 + pct) / n)
+                text = log.read_bytes().decode("utf-8", "replace") if log.exists() else ""
+                m = re.search(r"Successfully installed .*?\(title_id=(\w+)", text)
+                if not m:
+                    self.post("log", f"RPCS3 exited with code {proc.returncode}. The end of its own log:" if text else
+                                     f"RPCS3 exited with code {proc.returncode} and wrote no log.", "warn")
+                    for ln in text.splitlines()[-6:]:
+                        self.post("log", "  " + ln[:200], "info")
+                    why = re.findall(r"^·[EF] .*$", text, re.M)
+                    detail = (why[-1].split("}", 1)[-1].strip() if why else "")[:160]
+                    raise UnpackError("your RPCS3 could not install " + info["path"].name + (f": {detail}" if detail else
+                                      ". (Is this RPCS3 recent enough, and is the package complete?)"))
+                seen.append(m.group(1))
+            games = work / "dev_hdd0" / "game"
+            ids = [x for x in dict.fromkeys(seen) if (games / x).is_dir()]
+            if not ids:
+                raise UnpackError("RPCS3 said it installed the package, but no game folder appeared")
+            if len(ids) == 1:
+                os.replace(games / ids[0], out)
+            else:                                           # the packages put files in more than one place: each gets a folder of its own
+                out.mkdir(parents=True)
+                for x in ids:
+                    os.replace(games / x, out / x)
+            ok = True
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            if not ok:
+                shutil.rmtree(out, ignore_errors=True)
+        if ok:
+            job.note = f"{n} packages merged" if n > 1 else ""
+            self.folder_finish(job, out)
+            self.post("log", "The package sources were kept (a package has no checksum to prove the copy against). No licence (RAP) is needed to unpack; "
+                             "keep yours for playing.", "info")
+
     def do_join_ps3(self, job, o):
         """The pieces of a split PS3 disc image -> one ISO."""
         out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
@@ -9611,6 +9847,10 @@ class App:
 
     # ---- Wii keys and Dolphin
     def refresh_wii(self):
+        RPCS3[0] = find_rpcs3(self.v["rpcs3"].get().strip())
+        if hasattr(self, "rpcs3_status"):
+            self.rpcs3_status.config(text=f"✓ Found: {RPCS3[0]}" if RPCS3[0] else
+                                     "Not set yet. Without it, .pkg packages can be added but not unpacked.")
         load_wii_keys(self.v["wii_common_key"].get(), self.v["wii_korean_key"].get())
         WII_TOOL[0] = find_dolphintool(self.v["dolphintool"].get().strip())
         WII_SCRUB[0] = bool(self.v["wbfs_scrub"].get())
@@ -11026,6 +11266,7 @@ def cli_main(argv):
     ap.add_argument("--threads", type=int, default=0, metavar="N", help="CHD processors (default: all)")
     ap.add_argument("--level", type=int, choices=range(10), metavar="0-9", help="PBP compression (default 6)")
     ap.add_argument("--wii-key", metavar="HEX", help="your Wii common key (32 hex characters); or put it in the keys folder")
+    ap.add_argument("--rpcs3", metavar="EXE", help="your rpcs3.exe, used to unpack PS3 .pkg packages")
     ap.add_argument("--dolphintool", metavar="EXE", help="your DolphinTool.exe, used for Wii RVZ/WIA when there is no key")
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
@@ -11071,7 +11312,7 @@ def cli_main(argv):
     code = 1
     try:
         for k, d in DEFAULTS.items():                    # only the machine's own paths come from the saved settings
-            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "wii_common_key", "wii_korean_key"):
+            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "rpcs3", "wii_common_key", "wii_korean_key"):
                 app.v[k].set(d)
         v = app.v
         if a.output:
@@ -11095,6 +11336,8 @@ def cli_main(argv):
             v["wii_common_key"].set(a.wii_key)
         if a.dolphintool:
             v["dolphintool"].set(a.dolphintool)
+        if a.rpcs3:
+            v["rpcs3"].set(a.rpcs3)
         if a.rvz_method:
             v["rvz_method"].set(a.rvz_method)
         if a.rvz_level:
