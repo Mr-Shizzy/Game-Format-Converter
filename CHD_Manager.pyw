@@ -4310,6 +4310,10 @@ class Job:
         self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
         self.xbox = False              # an ISO that is an Xbox 360 disc image
+        self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
+        self.ps3_info = {}             # its game ID, title, region and whether its protected parts are still encrypted
+        self.warn = ""                 # something to tell the person when the item is added (it still works as far as it can)
+        self.note = ""                 # something to tell the person when it is finished
         self.size = 0
         self._raw = None
         self.src_files = []
@@ -4343,7 +4347,7 @@ class Job:
                 return sum(chd_logical_size(c) or c.stat().st_size * 3 for c in self.m3u_chds)
             if self.container == "cso":
                 return read_cso_header(p)[0]
-            if self.container in ("zar", "xfolder"):
+            if self.container in ("zar", "xfolder", "ps3folder"):
                 return self.zar_raw + 4 * XISO_MODULUS
             if self.container == "disc":
                 d = open_disc(p)
@@ -4378,6 +4382,10 @@ class Job:
             return [(k, target_label(k)) for k in ("chd", "iso", "folder")]
         if self.container == "xfolder":
             return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
+        if self.container == "ps3folder":           # a PS3 game folder: a disc image of it (RPCS3 loads those), or a CHD of one
+            return [(k, target_label(k)) for k in ("iso", "chd")]
+        if self.ps3:                                # a PS3 disc image: a CHD of it, or its files (not while they are still encrypted)
+            return [(k, target_label(k)) for k in (("chd",) if self.ps3_info.get("encrypted") else ("chd", "folder"))]
         if self.xbox:                               # an Xbox 360 ISO: a CHD of it, or Xenia's ZAR
             return [(k, target_label(k)) for k in ("chd", "zar", "folder")]
         if self.container == "disc":                # GameCube / Wii: Dolphin's formats (a CHD of these runs nowhere)
@@ -4460,6 +4468,8 @@ class Job:
     def guess_game_id(self):
         """The PlayStation game code ('SLUS01545') when it can be read straight from the file, else ''."""
         ext = self.path.suffix.lower()
+        if self.ps3_info:
+            return self.ps3_info.get("id", "")
         if self.container == "disc":
             return self.disc_info.get("id", "")
         try:
@@ -4483,10 +4493,20 @@ class Job:
 
     def _analyze(self):
         p, ext = self.path, self.path.suffix.lower()
-        if p.is_dir():                              # an Xbox 360 game folder (the disc's files, with default.xex at the top)
-            ents = folder_source(p)[0]
+        if p.is_dir():
+            info = ps3_folder_info(p)
+            if info is not None:                    # a PS3 game folder (PS3_GAME with a PARAM.SFO)
+                ents = ps3_folder_source(p)[0]
+                self.container, self.platform, self.types = "ps3folder", "PS3", ["MODE1"]
+                self.ps3, self.ps3_info = True, dict(info, encrypted=False)
+                self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
+                self.size, self.src_files = self.zar_raw, [p]
+                self.auto_type, self.reason = "DVD", "PS3 game folder"
+                return
+            ents = folder_source(p)[0]              # an Xbox 360 game folder (the disc's files, with default.xex at the top)
             if not any(len(pp) == 1 and pp[0].lower() == b"default.xex" and f for pp, f, _o, _s in ents):
-                raise ValueError("this folder doesn't look like an Xbox 360 game (there is no default.xex at its top level)")
+                raise ValueError("this folder doesn't look like an Xbox 360 or PlayStation 3 game (it has no default.xex at its top level "
+                                 "and no PS3_GAME folder with a PARAM.SFO)")
             self.container, self.platform, self.types = "xfolder", "Xbox 360", ["MODE1"]
             self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
             self.size, self.src_files = self.zar_raw, [p]
@@ -4610,6 +4630,14 @@ class Job:
             if kind:
                 self.platform, self.xbox = "Xbox 360" if kind == "360" else "Xbox", kind == "360"
                 self.auto_type, self.reason = "DVD", "Xbox disc image"
+            else:
+                pinfo = ps3_iso_kind(p)
+                if pinfo:
+                    self.platform, self.ps3, self.ps3_info = "PS3", True, pinfo
+                    self.auto_type, self.reason = "DVD", "PS3 disc image"
+                    if pinfo["encrypted"]:
+                        self.warn = ("this PS3 disc image is still encrypted, so its files can't be unpacked until it has been decrypted with your own "
+                                     "disc key. It can still become a CHD, which stores it exactly as it is")
         if self.lone_bin:
             self.reason += " (BIN without a CUE)"
         if self.missing:
@@ -5105,6 +5133,635 @@ def entries_match(a, b, progress=lambda x: None, stopped=lambda: False):
     return True
 
 
+# --------------------------------------------------------------------------- PlayStation 3: game folders and disc images
+# A PS3 disc image (what ISO tools such as makeps3iso write, and what RPCS3 loads when it is decrypted) is an ISO 9660 volume with a Joliet
+# name table (volume 'PS3VOLUME') in 2048-byte sectors, plus a small header in sector 0: a region table (which sectors are encrypted),
+# the text 'PlayStation3' and the game ID. A game folder holds PS3_GAME (with PARAM.SFO), PS3_DISC.SFB and, on a real disc, PS3_UPDATE
+# (a system update that no emulator uses). Nothing here decrypts anything: an image whose regions are still encrypted is recognised
+# and said so, and the files that are plain are handled like any others.
+PS3_SECTOR = 2048
+PS3_EXTENT = 0xFFFFF800                   # the most one ISO 9660 record holds (a whole number of sectors); bigger files get several records
+PS3_SPLIT_SECTORS = 0x1FFFE0              # a split image's parts: this many sectors (just under 4 GiB) each, named name.iso.0, name.iso.1, ...
+PS3_REGIONS = {"U": "USA", "E": "Europe", "J": "Japan", "A": "Asia", "K": "Korea", "H": "Hong Kong"}
+PS3_MAGIC = {".sprx": b"SCE\0", ".self": b"SCE\0", ".sfo": b"\0PSF", ".sfb": b".SFB", ".png": b"\x89PNG", ".pkg": b"\x7fPKG",
+             ".edat": b"NPD\0", ".sdat": b"NPD\0", ".trp": b"\xdc\xa2\x4d\x00", ".at3": b"RIFF", ".jpg": b"\xff\xd8\xff"}
+
+
+def read_sfo(data):
+    """PARAM.SFO bytes -> {key: text or number}; {} when it isn't one."""
+    try:
+        if data[:4] != b"\0PSF":
+            return {}
+        _ver, kt, dt, n = struct.unpack("<IIII", data[4:20])
+        out = {}
+        for i in range(min(n, 512)):
+            ko, fmt, ln, _mx, do = struct.unpack("<HHIII", data[20 + 16 * i:36 + 16 * i])
+            k = data[kt + ko:data.index(b"\0", kt + ko)].decode("ascii", "replace")
+            raw = data[dt + do:dt + do + ln]
+            out[k] = struct.unpack("<I", raw[:4])[0] if fmt == 0x0404 and len(raw) >= 4 else raw.split(b"\0")[0].decode("utf-8", "replace")
+        return out
+    except (struct.error, ValueError):
+        return {}
+
+
+def ps3_sfo_info(sfo):
+    """What a PARAM.SFO says about a game -> {'id': 'BLUS31077', 'title': ..., 'region': 'USA'}."""
+    gid = str(sfo.get("TITLE_ID", "")).replace("-", "").strip()
+    return {"id": gid, "title": str(sfo.get("TITLE", "")).strip(), "region": PS3_REGIONS.get(gid[2:3], "") if len(gid) >= 4 else ""}
+
+
+def _child(path, name):
+    """The entry of a folder called `name`, whatever its upper/lower case (Linux file systems care), or None."""
+    try:
+        for e in os.scandir(path):
+            if e.name.upper() == name:
+                return Path(e.path)
+    except OSError:
+        pass
+    return None
+
+
+def ps3_folder_info(path):
+    """A PS3 game folder (it holds PS3_GAME with a PARAM.SFO) -> its game info, else None."""
+    g = _child(path, "PS3_GAME")
+    s = _child(g, "PARAM.SFO") if g is not None and g.is_dir() else None
+    if s is None or not s.is_file():
+        return None
+    try:
+        return ps3_sfo_info(read_sfo(s.read_bytes()[:1 << 20]))
+    except OSError:
+        return {"id": "", "title": "", "region": ""}
+
+
+class _P3Parts:
+    """One disc image that may be kept in several files (name.iso.0, name.iso.1, ...), read as if it were one."""
+    def __init__(self, paths):
+        self.files = [open(p, "rb") for p in paths]
+        self.sizes = [os.fstat(f.fileno()).st_size for f in self.files]
+        self.size = sum(self.sizes)
+        self.pos = 0
+
+    def seek(self, pos):
+        self.pos = pos
+
+    def read(self, n):
+        out = []
+        while n > 0 and self.pos < self.size:
+            base = 0
+            for f, s in zip(self.files, self.sizes):
+                if self.pos < base + s:
+                    f.seek(self.pos - base)
+                    b = f.read(min(n, base + s - self.pos))
+                    if not b:
+                        return b"".join(out)
+                    out.append(b)
+                    self.pos += len(b)
+                    n -= len(b)
+                    break
+                base += s
+        return b"".join(out)
+
+    def close(self):
+        for f in self.files:
+            f.close()
+
+
+def _p3_open(src):
+    return _P3Parts([Path(p) for p in ([src] if isinstance(src, (str, Path)) else src)])
+
+
+def _p3_damaged():
+    return UnpackError("this disc image's file system is damaged or cut short")
+
+
+def _p3_quick(f):
+    """True when the image has an ISO 9660 volume whose top folder holds PS3_GAME (reads two sectors, so non-PS3 images are dismissed fast)."""
+    if f.size < 19 * PS3_SECTOR:
+        return False
+    f.seek(16 * PS3_SECTOR)
+    d = f.read(PS3_SECTOR)
+    if len(d) < PS3_SECTOR or d[0] != 1 or d[1:6] != b"CD001":
+        return False
+    lba, ln = struct.unpack("<I", d[158:162])[0], struct.unpack("<I", d[166:170])[0]
+    if ln > 1 << 20 or (lba + 1) * PS3_SECTOR > f.size:
+        return False
+    f.seek(lba * PS3_SECTOR)
+    t = f.read(max(ln, 0))
+    off = 0
+    while off < len(t):
+        n = t[off]
+        if n == 0:
+            off = (off // PS3_SECTOR + 1) * PS3_SECTOR
+            continue
+        if t[off + 25] & 2 and t[off + 33:off + 33 + t[off + 32]].upper() == b"PS3_GAME":
+            return True
+        off += n
+    return False
+
+
+def _p3_parse(f):
+    """The files of a PS3 disc image -> [(path parts as UTF-8 bytes, is_file, extents ((byte offset, length), ...), size)]. The Joliet
+    name table is used when there is one (it keeps the real upper/lower case), else the plain ISO 9660 one."""
+    size = f.size
+    pvd = jol = None
+    for i in range(16, 48):
+        f.seek(i * PS3_SECTOR)
+        d = f.read(PS3_SECTOR)
+        if len(d) < PS3_SECTOR or d[1:6] != b"CD001":
+            break
+        if d[0] == 1 and pvd is None:
+            pvd = d
+        elif d[0] == 2 and jol is None and d[88:91] in (b"%/@", b"%/C", b"%/E"):
+            jol = d
+        elif d[0] == 255:
+            break
+    if pvd is None:
+        raise UnpackError("this isn't a PS3 disc image (it has no ISO 9660 volume)")
+    use, is_j = (jol or pvd), jol is not None
+    entries, seen, visited = [], [0], set()
+
+    def spell(nm):
+        s = nm.decode("utf-16-be", "replace") if is_j else nm.decode("latin-1")
+        s = re.sub(r";\d+$", "", s)
+        if not is_j and len(s) > 1 and s.endswith("."):
+            s = s[:-1]
+        return s.encode("utf-8")
+
+    def walk(lba, length, parts, depth):
+        if depth > 64 or length > 1 << 28 or lba in visited or (lba * PS3_SECTOR + length) > size:
+            raise _p3_damaged()
+        visited.add(lba)
+        f.seek(lba * PS3_SECTOR)
+        d = f.read(length)
+        if len(d) < length:
+            raise _p3_damaged()
+        off, acc, acc_name = 0, [], None
+        while off < length:
+            n = d[off]
+            if n == 0:
+                off = (off // PS3_SECTOR + 1) * PS3_SECTOR
+                continue
+            if n < 34 or off + n > length:
+                raise _p3_damaged()
+            flags, nl = d[off + 25], d[off + 32]
+            ext, sz = struct.unpack("<I", d[off + 2:off + 6])[0], struct.unpack("<I", d[off + 10:off + 14])[0]
+            nm = d[off + 33:off + 33 + nl]
+            off += n
+            if nm in (b"\0", b"\1"):
+                continue
+            seen[0] += 1
+            if seen[0] > 2_000_000:
+                raise UnpackError("this disc image has too many files")
+            name = spell(nm)
+            if flags & 2:
+                entries.append((parts + (name,), False, (), 0))
+                walk(ext, sz, parts + (name,), depth + 1)
+                continue
+            if sz and (ext * PS3_SECTOR + sz) > size:
+                raise _p3_damaged()
+            acc.append((ext * PS3_SECTOR, sz))
+            if flags & 0x80:                                   # more pieces of this file follow
+                acc_name = acc_name or name
+                continue
+            entries.append((parts + (acc_name or name,), True, tuple(acc), sum(s for _o, s in acc)))
+            acc, acc_name = [], None
+
+    rd = use[156:190]
+    walk(struct.unpack("<I", rd[2:6])[0], struct.unpack("<I", rd[10:14])[0], (), 0)
+    return entries, struct.unpack("<I", pvd[80:84])[0]
+
+
+def _p3_read_extents(f, extents, size, chunk=1 << 20):
+    left = size
+    for off, ln in extents:
+        f.seek(off)
+        while ln > 0 and left > 0:
+            b = f.read(min(chunk, ln, left))
+            if not b:
+                raise UnpackError("the disc image is shorter than its file table says")
+            ln -= len(b)
+            left -= len(b)
+            yield b
+
+
+def ps3_regions(head):
+    """Sector 0 of a PS3 image -> [(first sector, last sector)] of the parts that are NOT encrypted, or None when it has no region table."""
+    try:
+        n = struct.unpack(">I", head[:4])[0]
+        if not 0 < n <= 64:
+            return None
+        w = struct.unpack(">%dI" % (2 + 2 * n), head[:8 + 8 * n])
+        return [(w[2 + 2 * i], w[3 + 2 * i]) for i in range(n)]
+    except struct.error:
+        return None
+
+
+def ps3_encrypted_check(f, entries, total):
+    """(looks encrypted, files checked, files that failed). Files that start inside an encrypted region should still begin with their
+    format's marker (a program 'SCE', a PARAM.SFO '\\0PSF', a PNG ...); when most of those that can be checked don't, the region is
+    still encrypted. An image without a region table is judged by the same markers on a sample of its files."""
+    f.seek(0)
+    plain = ps3_regions(f.read(PS3_SECTOR))
+    if plain is not None:
+        enc, pos = [], 0
+        for a, b in sorted(plain):
+            if a > pos:
+                enc.append((pos, a - 1))
+            pos = max(pos, b + 1)
+        if pos < total:
+            enc.append((pos, total - 1))
+        if not enc:
+            return False, 0, 0
+    else:
+        enc = [(0, total)]
+    checked = bad = 0
+    for parts, is_file, ext, sz in entries:
+        if not is_file or not ext or sz < 4:
+            continue
+        name = parts[-1].decode("utf-8", "replace").lower()
+        want = PS3_MAGIC.get(os.path.splitext(name)[1]) or (b"SCE\0" if name == "eboot.bin" else None)
+        sector = ext[0][0] // PS3_SECTOR
+        if not want or not any(a <= sector <= b for a, b in enc):
+            continue
+        f.seek(ext[0][0])
+        checked += 1
+        if f.read(len(want)) != want:
+            bad += 1
+        if checked >= 80:
+            break
+    return bool(checked and bad and bad * 2 >= checked), checked, bad
+
+
+def ps3_iso_kind(path):
+    """A PS3 disc image -> {'id', 'title', 'region', 'encrypted', 'checked', 'bad'}; None for anything else (a plain ISO, an Xbox disc...)."""
+    try:
+        f = _p3_open(path)
+    except OSError:
+        return None
+    try:
+        if not _p3_quick(f):
+            return None
+        entries, total = _p3_parse(f)
+        info = {"id": "", "title": "", "region": ""}
+        sfo = next((e for e in entries if e[1] and [x.upper() for x in e[0]] == [b"PS3_GAME", b"PARAM.SFO"]), None)
+        if sfo is not None and sfo[3] < 1 << 20:
+            info = ps3_sfo_info(read_sfo(b"".join(_p3_read_extents(f, sfo[2], sfo[3]))))
+        enc, checked, bad = ps3_encrypted_check(f, entries, total)
+        info.update(encrypted=enc, checked=checked, bad=bad)
+        return info
+    except (UnpackError, OSError, struct.error):
+        return None
+    finally:
+        f.close()
+
+
+def ps3_iso_source(path):
+    """(entries, read, close) for the files inside a PS3 disc image (one file, or the parts of a split one)."""
+    f = _p3_open(path)
+    try:
+        entries, _total = _p3_parse(f)
+    except BaseException:
+        f.close()
+        raise
+
+    def read(extents, size, chunk=1 << 20):
+        return _p3_read_extents(f, extents, size, chunk)
+    return entries, read, f.close
+
+
+def ps3_folder_source(path, keep_update=False):
+    """(entries, read, close) for the files of a PS3 game folder. PS3_UPDATE (a system update that no emulator uses) is left out
+    unless keep_update. Names are kept as UTF-8."""
+    path = Path(path)
+    ents = []
+    for dp, dns, fns in os.walk(path):
+        rel = Path(dp).relative_to(path).parts
+        dns.sort()
+        shown = list(dns)                                    # the folder itself stays (empty, as on the tools' images); its contents don't
+        if not rel and not keep_update:
+            dns[:] = [d for d in dns if d.upper() != "PS3_UPDATE"]
+        try:
+            for d in shown:
+                ents.append((tuple(x.encode("utf-8") for x in rel + (d,)), False, None, 0))
+            for fn in sorted(fns):
+                fp = Path(dp, fn)
+                if fp.is_file():
+                    ents.append((tuple(x.encode("utf-8") for x in rel + (fn,)), True, fp, fp.stat().st_size))
+        except UnicodeEncodeError:
+            raise UnpackError("a file or folder name in this game isn't valid text, so it can't be stored in a disc image") from None
+
+    def read(fp, size, chunk=1 << 20):
+        with open(fp, "rb") as f:
+            while size > 0:
+                b = f.read(min(chunk, size))
+                if not b:
+                    raise UnpackError(f"{Path(fp).name} is shorter than it was a moment ago")
+                size -= len(b)
+                yield b
+    return ents, read, lambda: None
+
+
+def fix_file_name(raw, enc="utf-8"):
+    """A name from a disc image -> a name any computer accepts. Anything that would not do is changed to '_' (the caller says so)."""
+    name = raw.decode(enc, "replace")
+    fixed = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", name)
+    if fixed in ("", ".", ".."):
+        fixed = "_" * max(1, len(fixed))
+    if fixed[-1] in ". ":
+        fixed = fixed.rstrip(". ") + "_"
+    if fixed.split(".")[0].upper() in _WIN_RESERVED:
+        fixed = "_" + fixed
+    return fixed
+
+
+# ---- writing a disc image
+class _P3Node:
+    __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num")
+
+    def __init__(self, name, is_dir, size=0, src=None):
+        self.name, self.is_dir, self.size, self.src = name, is_dir, size, src
+        self.kids, self.pname, self.jname, self.lba = [], b"", b"", 0
+        self.ex, self.dbytes, self.num = {}, {}, {}
+
+
+def _p3_spell(raw, is_dir, used):
+    """The plain ISO 9660 spelling of a name: capital ASCII letters, ';1' on files, never two alike in one folder."""
+    text = raw.decode("utf-8", "replace")
+    asc = "".join(c if 32 <= ord(c) < 127 and c not in '/\\;:*?"<>|' else "_" for c in text).upper()[:200] or "_"
+    cand, n = asc, 0
+    while cand in used:
+        n += 1
+        stem, dot, ext = asc.rpartition(".") if (not is_dir and "." in asc) else (asc, "", "")
+        cand = f"{stem[:190]}~{n}{dot}{ext}"
+    used.add(cand)
+    return (cand + ("" if is_dir else ";1")).encode("ascii")
+
+
+def _p3_tree(entries):
+    root = _P3Node(b"", True)
+    index = {(): root}
+    for parts, is_file, src, size in entries:
+        parent = index.get(parts[:-1])
+        if parent is None:
+            raise UnpackError("a file in this game has no folder around it")
+        node = _P3Node(parts[-1], not is_file, size if is_file else 0, src)
+        parent.kids.append(node)
+        if not is_file:
+            index[parts] = node
+    todo = [root]
+    while todo:
+        d = todo.pop()
+        used = set()
+        for k in sorted(d.kids, key=lambda x: x.name):
+            k.pname = _p3_spell(k.name, k.is_dir, used)
+            units = len(k.name.decode("utf-8", "replace").encode("utf-16-be")) // 2
+            if units + (0 if k.is_dir else 2) > 108:
+                raise UnpackError("the name '" + k.name.decode("utf-8", "replace")[:40] + "…' is too long for a PS3 disc image (about 100 characters at most)")
+            k.jname = k.name.decode("utf-8", "replace").encode("utf-16-be") + (b"" if k.is_dir else ";1".encode("utf-16-be"))
+            if k.is_dir:
+                todo.append(k)
+    return root
+
+
+def _p3_record(extent, size, flags, name, when):
+    n = len(name)
+    ln = 33 + n + (1 if n % 2 == 0 else 0)
+    r = bytearray(ln)
+    r[0] = ln
+    r[2:10] = struct.pack("<I", extent) + struct.pack(">I", extent)
+    r[10:18] = struct.pack("<I", size) + struct.pack(">I", size)
+    r[18:25] = when
+    r[25] = flags
+    r[28:32] = struct.pack("<H", 1) + struct.pack(">H", 1)
+    r[32] = n
+    r[33:33 + n] = name
+    return bytes(r)
+
+
+def _p3_extents(lba, size):
+    """The records one file needs: a single one, or several of PS3_EXTENT bytes (all but the last marked 'more follows')."""
+    if size <= PS3_EXTENT:
+        return [(lba, size, 0)]
+    out, off = [], 0
+    while size - off > PS3_EXTENT:
+        out.append((lba + off // PS3_SECTOR, PS3_EXTENT, 0x80))
+        off += PS3_EXTENT
+    out.append((lba + off // PS3_SECTOR, size - off, 0))
+    return out
+
+
+def _p3_dir_bytes(d, key, parent, when):
+    """One folder's records (itself, its parent, then its contents in name order), packed so that none crosses a sector.
+    Uses the extents and sizes recorded so far (zero before they are known: the length of the records doesn't depend on them)."""
+    name = "pname" if key == "p" else "jname"
+    recs = [_p3_record(d.ex.get(key, 0), d.dbytes.get(key, 0), 2, b"\0", when),
+            _p3_record(parent.ex.get(key, 0), parent.dbytes.get(key, 0), 2, b"\1", when)]
+    for k in sorted(d.kids, key=lambda x: getattr(x, name)):
+        nm = getattr(k, name)
+        if k.is_dir:
+            recs.append(_p3_record(k.ex.get(key, 0), k.dbytes.get(key, 0), 2, nm, when))
+        else:
+            for e, s, fl in _p3_extents(k.lba, k.size):
+                recs.append(_p3_record(e, s, fl, nm, when))
+    out = bytearray()
+    for r in recs:
+        room = PS3_SECTOR - len(out) % PS3_SECTOR
+        if len(r) > room:
+            out += bytes(room)
+        out += r
+    out += bytes(-len(out) % PS3_SECTOR)
+    return bytes(out)
+
+
+def _p3_path_table(order, key, big):
+    name = "pname" if key == "p" else "jname"
+    out = bytearray()
+    for i, d in enumerate(order):
+        nm = b"\0" if i == 0 else getattr(d, name)
+        parent = 1 if i == 0 else d.num["parent_" + key]
+        out += bytes([len(nm), 0])
+        out += struct.pack(">I" if big else "<I", d.ex[key])
+        out += struct.pack(">H" if big else "<H", parent)
+        out += nm
+        if len(nm) % 2:
+            out += b"\0"
+    return bytes(out)
+
+
+def _p3_pt_size(order, key):
+    name = "pname" if key == "p" else "jname"
+    n = 0
+    for i, d in enumerate(order):
+        ln = 1 if i == 0 else len(getattr(d, name))
+        n += 8 + ln + (ln & 1)
+    return n
+
+
+def _p3_volume(joliet, total, ptsize, lpath, mpath, root_rec, stamp):
+    """A primary (or Joliet supplementary) volume descriptor, written the way makeps3iso writes it."""
+    v = bytearray(PS3_SECTOR)
+    v[0] = 2 if joliet else 1
+    v[1:6] = b"CD001"
+    v[6] = 1
+    uni = "PS3VOLUME".encode("utf-16-be")
+    if joliet:
+        v[40:72] = uni.ljust(32, b"\0")
+        v[88:91] = b"\x25\x2f\x40"
+    else:
+        v[8:40] = b" " * 32
+        v[40:72] = b"PS3VOLUME".ljust(32)
+    v[80:88] = struct.pack("<I", total) + struct.pack(">I", total)
+    v[120:124] = struct.pack("<H", 1) + struct.pack(">H", 1)
+    v[124:128] = struct.pack("<H", 1) + struct.pack(">H", 1)
+    v[128:132] = struct.pack("<H", PS3_SECTOR) + struct.pack(">H", PS3_SECTOR)
+    v[132:140] = struct.pack("<I", ptsize) + struct.pack(">I", ptsize)
+    v[140:144] = struct.pack("<I", lpath)
+    v[148:152] = struct.pack(">I", mpath)
+    v[156:190] = root_rec
+    if joliet:
+        v[190:318] = uni.ljust(128, b"\0")
+    else:
+        v[190:881] = b" " * (881 - 190)
+        v[190:199] = b"PS3VOLUME"
+    v[813:830] = stamp + b"\0"
+    for off in (830, 847, 864):
+        v[off:off + 17] = b"0000000000000000\0"
+    v[881] = 1
+    return bytes(v)
+
+
+class _P3Out:
+    """Writes the image as one file, or as parts of PS3_SPLIT_SECTORS sectors named base.0, base.1, ... Keeps the names it made."""
+    def __init__(self, base, split):
+        self.base, self.split, self.files, self.f, self.left = str(base), split, [], None, 0
+        self._next()
+
+    def _next(self):
+        if self.f:
+            self.f.close()
+        p = self.base + (f".{len(self.files)}" if self.split else "")
+        self.files.append(Path(p))
+        self.f = open(p, "wb")
+        self.left = PS3_SPLIT_SECTORS * PS3_SECTOR
+
+    def write(self, b):
+        if not self.split:
+            self.f.write(b)
+            return
+        mv = memoryview(b)
+        while len(mv):
+            if self.left == 0:
+                self._next()
+            k = min(len(mv), self.left)
+            self.f.write(mv[:k])
+            self.left -= k
+            mv = mv[k:]
+
+    def close(self):
+        if self.f:
+            self.f.close()
+            self.f = None
+
+
+def build_ps3_iso(entries, out_base, read, title_id="", progress=lambda x: None, stopped=lambda: False, split=False):
+    """Write a PS3 disc image of `entries` [(path parts as bytes, is_file, src, size)]; read(src, size) yields each file's bytes.
+    Layout as makeps3iso writes it (so the same tools and RPCS3 read it): the header sector with a single 'not encrypted' region over the
+    whole disc, an ISO 9660 volume and a Joliet one that share the files, folders in name order. With split, an image of more than
+    4 GiB goes into parts out_base.0, out_base.1 ... Returns the list of files written."""
+    import datetime
+    root = _p3_tree(entries)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    when = bytes([now.year - 1900, now.month, now.day, now.hour, now.minute, now.second, 0])
+    stamp = now.strftime("%Y%m%d%H%M%S00").encode()
+    orders, parents = {}, {}
+    for key, name in (("p", "pname"), ("j", "jname")):
+        order, level = [], [root]
+        parents[(key, id(root))] = root
+        while level:
+            nxt = []
+            for d in level:
+                order.append(d)
+                kids = sorted((k for k in d.kids if k.is_dir), key=lambda x: getattr(x, name))
+                for k in kids:
+                    parents[(key, id(k))] = d
+                nxt += kids
+            level = nxt
+        for i, d in enumerate(order):
+            d.num[key] = i + 1
+            d.num["parent_" + key] = parents[(key, id(d))].num[key] if i else 1
+        orders[key] = order
+    for key in ("p", "j"):                                           # folder sizes first: they don't depend on where anything lies
+        for d in orders[key]:
+            d.dbytes[key] = len(_p3_dir_bytes(d, key, parents[(key, id(d))], when))
+    ptsz = {k: _p3_pt_size(orders[k], k) for k in ("p", "j")}
+    secs = {k: (ptsz[k] + PS3_SECTOR - 1) // PS3_SECTOR for k in ("p", "j")}
+    lba = 20
+    tables = {}
+    for k in ("p", "j"):
+        tables[k] = (lba, lba + secs[k])
+        lba += 2 * secs[k]
+    lba = max(32, lba)
+    for key in ("p", "j"):
+        for d in orders[key]:
+            d.ex[key] = lba
+            lba += d.dbytes[key] // PS3_SECTOR
+    files = []
+
+    def walk(d):
+        for k in sorted((x for x in d.kids if not x.is_dir), key=lambda x: x.pname):
+            files.append(k)
+        for k in sorted((x for x in d.kids if x.is_dir), key=lambda x: x.pname):
+            walk(k)
+    walk(root)
+    first_file = lba
+    for k in files:
+        k.lba = lba
+        lba += (k.size + PS3_SECTOR - 1) // PS3_SECTOR
+    total = lba
+    head = bytearray(first_file * PS3_SECTOR)
+    gid = title_id.replace("-", "")
+    head[0:4] = struct.pack(">I", 1)
+    head[8:16] = struct.pack(">II", 0, total - 1)
+    head[0x800:0x80C] = b"PlayStation3"
+    head[0x810:0x830] = (gid[:4] + "-" + gid[4:] if len(gid) > 4 else gid).encode("ascii", "replace")[:32].ljust(32)
+    head[0x840:0x9F0] = os.urandom(0x1B0)
+    head[0x9F0:0xA00] = os.urandom(0x10)
+    for key, idx in (("p", 16), ("j", 17)):
+        rr = _p3_record(root.ex[key], root.dbytes[key], 2, b"\0", when)
+        head[idx * PS3_SECTOR:(idx + 1) * PS3_SECTOR] = _p3_volume(key == "j", total, ptsz[key], tables[key][0], tables[key][1], rr, stamp)
+    head[18 * PS3_SECTOR:18 * PS3_SECTOR + 6] = b"\xffCD001"
+    for key in ("p", "j"):
+        for big, at in ((False, tables[key][0]), (True, tables[key][1])):
+            t = _p3_path_table(orders[key], key, big)
+            head[at * PS3_SECTOR:at * PS3_SECTOR + len(t)] = t
+        for d in orders[key]:
+            b = _p3_dir_bytes(d, key, parents[(key, id(d))], when)
+            head[d.ex[key] * PS3_SECTOR:d.ex[key] * PS3_SECTOR + len(b)] = b
+    out = _P3Out(out_base, bool(split) and total > PS3_SPLIT_SECTORS)
+    try:
+        out.write(bytes(head))
+        grand = sum(k.size for k in files) or 1
+        done = 0
+        for k in files:
+            wrote = 0
+            for piece in read(k.src, k.size):
+                out.write(piece)
+                wrote += len(piece)
+                done += len(piece)
+                progress(done / grand)
+                if stopped():
+                    raise UnpackError("stopped")
+            if wrote != k.size:
+                raise UnpackError(f"{k.name.decode('utf-8', 'replace')} came out shorter than it should")
+            pad = -wrote % PS3_SECTOR
+            if pad:
+                out.write(bytes(pad))
+    finally:
+        out.close()
+    progress(1.0)
+    return list(out.files)
+
+
 def _lower(b):
     return bytes(c + 32 if 65 <= c <= 90 else c for c in b)
 
@@ -5586,7 +6243,7 @@ def write_m3u_playlists(outputs, exists="Skip"):
 # --------------------------------------------------------------------------- App
 DEFAULTS = {
     "chdman": "", "compression": "Default", "custom_comp": "", "hunk": "", "threads": 0,
-    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True,
+    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
     "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
@@ -5604,6 +6261,9 @@ def sentence(text):
 
 def plain_exc(e):
     """An exception raised while reading a file -> a sentence a person can act on."""
+    if isinstance(e, PermissionError) or getattr(e, "winerror", None) in (5, 32):
+        return sentence("the file is in use by another program or can't be read. If it is a disc image, Windows may have mounted it as a drive: "
+                        "right-click that drive, choose Eject, and add the file again")
     if isinstance(e, OSError):
         return sentence(f"the file couldn't be opened ({e.strerror or e})")
     if isinstance(e, UnpackError):
@@ -6017,6 +6677,13 @@ class App:
         ttk.Button(g3, text="Wii setup (Dolphin or your key)…", command=self.show_wii_setup).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.wii_status = ttk.Label(g3, text="", style="Muted.TLabel", wraplength=560, justify="left")
         self.wii_status.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
+
+        g4 = ttk.LabelFrame(f, text=" PlayStation 3 (game folder ↔ ISO) ", padding=10)
+        g4.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(g4, text="Split ISOs of more than 4 GB into .iso.0, .iso.1 … parts (only for FAT32 drives on a real PS3; leave off for RPCS3)",
+                        variable=v["ps3_split"]).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(g4, text="Keep the PS3_UPDATE folder when making an ISO (a system update on real discs; no emulator uses it)",
+                        variable=v["ps3_update"]).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         # --- Output
         f = tab("Output")
@@ -6959,7 +7626,7 @@ class App:
                 files, ignored = self.scan_folder(p)
                 found += [(f, p) for f in files]
                 if not files and not ignored:
-                    self.refuse(p.name, "No disc images were found in this folder (its sub-folders were searched too).", "warn")
+                    self.refuse(p.name, "No disc images or game folders (Xbox 360, PlayStation 3) were found in this folder (its sub-folders were searched too).", "warn")
                 if ignored:
                     self.refuse(p.name, sentence(f"{sum(ignored.values())} {', '.join(sorted(ignored))} file(s) were left out: an .mdf is only the data half "
                                                  "of a disc image, and it needs its .mds file next to it"), "warn",
@@ -7014,6 +7681,8 @@ class App:
             iid = self.tree.insert("", "end", values=job.row(), tags=("odd" if len(self.tree_ids) % 2 else "even",))
             self.tree_ids[iid] = job
             added += 1
+            if job.warn:
+                self.refuse(job.path.name, sentence("it was added, but " + job.warn), "warn")
             if job.missing:
                 self.refuse(job.path.name, sentence("it was added, but it won't convert: the files it points to weren't found next to it ("
                                                    + ", ".join(job.missing) + ")"), "warn",
@@ -7203,6 +7872,10 @@ class App:
         found, ignored = [], {}
         allf, games = [], []
         for dp, dn, fns in os.walk(p):
+            if any(x.upper() == "PS3_GAME" for x in dn) and ps3_folder_info(Path(dp)) is not None:
+                games.append(Path(dp))                          # a PS3 game folder: taken whole
+                dn[:] = []
+                continue
             if any(x.lower() == "default.xex" for x in fns):
                 games.append(Path(dp))                          # an Xbox 360 game folder: taken whole
                 dn[:] = []
@@ -7562,12 +8235,14 @@ class App:
     def out_stem(self, job, o):
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
-        stem = job.home.name if job.container == "xfolder" else job.home.stem
+        stem = job.home.name if job.container in ("xfolder", "ps3folder") else job.home.stem
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
         dbf = find_gamedb()
         ent = load_gamedb(dbf).get(gid) if gid and dbf else None
+        if ent is None and job.ps3_info.get("title") and gid:       # PlayStation 3: the title and region in PARAM.SFO
+            ent = dict(title=job.ps3_info["title"], main_title=job.ps3_info["title"], main_id=gid, region=job.ps3_info.get("region", ""))
         if ent is None and job.container == "disc" and gid:        # GameCube / Wii: the name stored on the disc
             di = job.disc_info
             ent = dict(title=di["title"], main_title=di["title"], main_id=gid,
@@ -7626,7 +8301,7 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder")) or t in ("cue_fix", "art", "zar", "folder")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder")) or t in ("cue_fix", "art", "zar", "folder")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         out = self.output_path(job, o, SPACE_EXT.get(t, ".x"), make=False).parent
@@ -7707,6 +8382,12 @@ class App:
         if job.container == "cso":
             iso = Path(outdir) / f"{tag}.iso"
             cso_to_iso(job.path, iso, prog, stopped)
+            return iso
+        if job.container == "ps3folder":
+            if not iso_ok:
+                raise UnpackError("a PS3 disc image is a DVD-style image, and this chdman is too old to make those (get one from MAME 0.255 or later)")
+            iso = Path(outdir) / f"{tag}.iso"
+            self.ps3_to_iso(job, iso, prog)
             return iso
         if job.container in ("zar", "xfolder"):
             if not iso_ok:
@@ -8056,6 +8737,8 @@ class App:
             return self.do_cso_to_iso(job, o)
         if t == "iso" and job.container in ("zar", "xfolder"):
             return self.do_zar_to_iso(job, o)
+        if t == "iso" and job.container == "ps3folder":
+            return self.do_ps3_to_iso(job, o)
         if t == "zar":
             return self.do_to_zar(job, o)
         if t == "folder":
@@ -8364,6 +9047,164 @@ class App:
         if o["delete_src"]:
             self.remove_sources(job, o)
 
+    def rm_parts(self, base):
+        """Delete base and base.0, base.1 ... (the leftovers of a PS3 image that did not finish)."""
+        base = Path(base)
+        try:
+            for e in os.listdir(base.parent):
+                if e == base.name or (e.startswith(base.name + ".") and e[len(base.name) + 1:].isdigit()):
+                    (base.parent / e).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def ps3_to_iso(self, job, dest, prog, split=False):
+        """The files of a PS3 game folder -> a PS3 disc image at dest (or parts dest.0, dest.1 ...). Returns the files written. With
+        'verify' on, the finished image is read back against the folder."""
+        verify = self.verify_wanted()
+        stop = lambda: self.stop_flag  # noqa: E731
+        keep = bool(getattr(self, "cur_opts", {}).get("ps3_update"))
+        ents, read, close = ps3_folder_source(job.path, keep)
+        try:
+            sfo = next((e for e in ents if e[1] and [x.upper() for x in e[0]] == [b"PS3_GAME", b"PARAM.SFO"]), None)
+            info = ps3_sfo_info(read_sfo(b"".join(read(sfo[2], sfo[3])))) if sfo is not None and sfo[3] < 1 << 20 else {}
+            if not info.get("id"):
+                self.post("log", f"{job.path.name}: PS3_GAME\\PARAM.SFO is missing or unreadable, so the image is made without a game ID in its header.", "warn")
+            if not any(e[1] and [x.upper() for x in e[0]] == [b"PS3_DISC.SFB"] for e in ents):
+                self.post("log", f"{job.path.name}: PS3_DISC.SFB is missing. The image is made anyway: RPCS3 doesn't need that file, a real PS3 does.", "warn")
+            if not keep and _child(job.path, "PS3_UPDATE") is not None:
+                self.post("log", f"{job.path.name}: the files in PS3_UPDATE (a system update that no emulator uses) are left out; the folder is kept, empty. "
+                                 "Settings, Formats can keep them.", "info")
+            files = build_ps3_iso(ents, dest, read, info.get("id", ""), lambda x: prog(x * (0.55 if verify else 1.0)), stop, split=split)
+            if verify:
+                self.post("log", "Reading the new disc image back against the folder…", "info")
+                e2, r2, c2 = ps3_iso_source(files)
+                try:
+                    if not entries_match((ents, read), (e2, r2), lambda x: prog(0.55 + x * 0.45), stop):
+                        raise UnpackError("the disc image that was built didn't match the folder it came from; it was discarded")
+                finally:
+                    c2()
+        finally:
+            close()
+        prog(1.0)
+        return files
+
+    def do_ps3_to_iso(self, job, o):
+        """A PS3 game folder -> an ISO (a whole one, or 4 GB parts when Settings says so)."""
+        split = bool(o.get("ps3_split"))
+        out0 = self.output_path(job, o, ".iso")
+        if o["exists"] == "Skip" and out0.with_name(out0.name + ".0").exists():
+            job.status, job.result = "Skipped (exists)", f"{out0.name}.0 already exists (see 'If output exists' in Settings)"
+            self.post("log", f"Skipped {job.path.name}: {out0.name}.0 already exists.", "warn")
+            return
+        out, _, skip = self.handle_exists(job, out0, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        self.post("log", f"\n{job.path.name}  [PS3 game folder → ISO]" + ("  (split into 4 GB parts)" if split else ""), "info")
+        try:
+            files = self.ps3_to_iso(job, part, self.cso_progress(job, "Building ISO"), split=split)
+            for old in [out] + [out.with_name(out.name + f".{i}") for i in range(200)]:      # leftovers of an earlier run that is being replaced
+                old.unlink(missing_ok=True)
+            if len(files) == 1 and files[0] == part:
+                os.replace(part, out)
+                finals = [out]
+            else:
+                finals = []
+                for i, f_ in enumerate(files):
+                    dst = out.with_name(out.name + f".{i}")
+                    os.replace(f_, dst)
+                    finals.append(dst)
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            self.rm_parts(part)
+        job.out_path, job.out_size = finals[0], sum(f_.stat().st_size for f_ in finals)
+        job.status = "Done"
+        job.result = f"→ {finals[0].name}" + (f" … .{len(finals) - 1}  ({len(finals)} parts)" if len(finals) > 1 else "")
+        self.post("log", f"OK  {finals[0]}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def ps3_to_folder(self, job, dest, prog, path):
+        """The files of a PS3 disc image -> loose files in the folder dest. A name this computer can't use is changed (and listed in the log)
+        instead of stopping the whole disc. With 'verify' on, what was written is read back against the image."""
+        verify = self.verify_wanted()
+        stop = lambda: self.stop_flag  # noqa: E731
+        info = ps3_iso_kind(path)
+        if info and info.get("encrypted"):
+            raise UnpackError("this PS3 disc image is still encrypted (its protected parts can't be read without your own disc key), so its files would "
+                              "come out unreadable. Decrypt it first, or make a CHD of it, which keeps it exactly as it is")
+        ents, read, close = ps3_iso_source(path)
+        try:
+            root = Path(dest).resolve()
+            mapped, taken, renamed, fixed_ents = {(): ()}, set(), [], []
+            for parts, is_file, src, size in ents:
+                parent = mapped[parts[:-1]]
+                nm = fix_file_name(parts[-1])
+                base = nm
+                n = 0
+                while (parent, nm.lower()) in taken:
+                    n += 1
+                    stem, dot, ext = base.rpartition(".") if "." in base[1:] else (base, "", "")
+                    nm = f"{stem}~{n}{dot}{ext}"
+                taken.add((parent, nm.lower()))
+                if nm != parts[-1].decode("utf-8", "replace"):
+                    renamed.append((parts[-1].decode("utf-8", "replace"), nm))
+                mapped[parts] = parent + (nm,)
+                fixed_ents.append((tuple(x.encode("utf-8") for x in parent + (nm,)), is_file, src, size))
+            if renamed:
+                shown = "; ".join(f"{a!r} → {b!r}" for a, b in renamed[:6]) + (f"; and {len(renamed) - 6} more" if len(renamed) > 6 else "")
+                self.post("log", f"{job.path.name}: {len(renamed)} name(s) in the image can't be used on this computer and were changed: {shown}", "warn")
+                job.note = f"{len(renamed)} name(s) changed, see the log"
+            total = sum(sz for _p, f, _o, sz in fixed_ents if f) or 1
+            done = 0
+            for parts, is_file, src, size in fixed_ents:
+                target = root.joinpath(*[x.decode("utf-8") for x in parts])
+                if root not in target.resolve().parents:
+                    raise UnpackError("a name in the disc image points outside the folder it is being unpacked into; nothing was made")
+                if not is_file:
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as g:
+                    for piece in read(src, size):
+                        g.write(piece)
+                        done += len(piece)
+                        prog(done / total * (0.6 if verify else 1.0))
+                        if stop():
+                            raise UnpackError("stopped")
+            if verify:
+                self.post("log", "Reading the new folder back against the disc image…", "info")
+                e2, r2, c2 = ps3_folder_source(root, True)
+                try:
+                    if not entries_match((fixed_ents, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
+                        raise UnpackError("the files that were written didn't match what they came from; they were discarded")
+                finally:
+                    c2()
+        finally:
+            close()
+        prog(1.0)
+
+    def disc_to_folder(self, job, dest, prog, iso=None):
+        """The files of a disc image (or a ZAR) -> a game folder: Xbox 360 or PlayStation 3, whichever it is."""
+        if iso is None and job.container in ("zar", "xfolder"):
+            return self.xbox_to_folder(job, dest, prog)
+        path = iso or job.path
+        if ps3_iso_kind(path) is not None:
+            return self.ps3_to_folder(job, dest, prog, path)
+        if xbox_iso_kind(path) in ("360", "xbox"):
+            return self.xbox_to_folder(job, dest, prog, iso=iso)
+        raise UnpackError("this isn't an Xbox 360 or PlayStation 3 disc image, so it can't become a game folder")
+
     def xbox_to_folder(self, job, dest, prog, iso=None):
         """The files of an Xbox 360 ZAR or disc image -> loose files in the folder dest. With 'verify' on, what was written is
         read back against the source."""
@@ -8429,20 +9270,20 @@ class App:
     def folder_finish(self, job, out):
         job.out_path = out
         job.out_size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
-        job.status, job.result = "Done", f"→ {out.name}\\"
+        job.status, job.result = "Done", f"→ {out.name}\\" + (f"  ({job.note})" if job.note else "")
         self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
 
     def do_to_folder(self, job, o):
-        """An Xbox 360 ZAR or ISO -> a game folder."""
+        """An Xbox 360 ZAR or ISO, or a PS3 ISO -> a game folder."""
         out, skip = self.folder_target(job, o)
         if skip:
             return
         created = not out.exists()
-        self.post("log", f"\n{job.path.name}  [Xbox 360 → game folder]", "info")
+        self.post("log", f"\n{job.path.name}  [{job.platform or 'disc'} → game folder]", "info")
         ok = False
         try:
             out.mkdir(parents=True, exist_ok=True)
-            self.xbox_to_folder(job, out, self.cso_progress(job, "Unpacking"))
+            self.disc_to_folder(job, out, self.cso_progress(job, "Unpacking"))
             ok = True
         except UnpackError as e:
             if self.stop_flag:
@@ -8464,7 +9305,7 @@ class App:
     def extract_to_folder(self, job, o):
         """A DVD CHD of an Xbox disc -> a game folder (through a temporary ISO)."""
         if job.disc != "DVD":
-            job.status, job.result = "Failed (not possible)", f"A game folder is only possible for an Xbox 360 DVD; this CHD holds a {job.disc} disc."
+            job.status, job.result = "Failed (not possible)", f"A game folder is only possible for an Xbox 360 or PlayStation 3 disc image; this CHD holds a {job.disc} disc."
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         out, skip = self.folder_target(job, o)
@@ -8486,7 +9327,7 @@ class App:
                 return
             out.mkdir(parents=True, exist_ok=True)
             try:
-                self.xbox_to_folder(job, out, self.cso_progress(job, "Unpacking"), iso=iso)
+                self.disc_to_folder(job, out, self.cso_progress(job, "Unpacking"), iso=iso)
                 ok = True
             except UnpackError as e:
                 if self.stop_flag:
@@ -10024,6 +10865,8 @@ def cli_main(argv):
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
     ap.add_argument("--rvz-block", type=int, metavar="KIB", help="RVZ block size in KiB, 32 to 2048 (default 128)")
     ap.add_argument("--no-m3u", action="store_true", help="don't write .m3u playlists for multi-disc games")
+    ap.add_argument("--ps3-split", action="store_true", help="PS3: split ISOs of more than 4 GB into .iso.0, .iso.1 ... parts (for FAT32 drives)")
+    ap.add_argument("--ps3-update", action="store_true", help="PS3: keep the PS3_UPDATE folder when making an ISO")
     ap.add_argument("--no-scrub", action="store_true", help="WBFS: keep all data, don't leave out what nothing uses")
     ap.add_argument("--art", metavar="DIR", help="your PBP artwork folder (one subfolder per game)")
     ap.add_argument("--no-cards", action="store_true", help="don't draw title cards for PBPs without artwork")
@@ -10095,6 +10938,10 @@ def cli_main(argv):
             v["wbfs_scrub"].set(False)
         if a.no_m3u:
             v["make_m3u"].set(False)
+        if a.ps3_split:
+            v["ps3_split"].set(True)
+        if a.ps3_update:
+            v["ps3_update"].set(True)
         if a.art:
             v["art_dir"].set(a.art)
         if a.base_pbp:
