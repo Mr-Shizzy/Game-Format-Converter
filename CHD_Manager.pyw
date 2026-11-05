@@ -4311,6 +4311,7 @@ class Job:
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
+        self.split_stem = ""           # a PS3 image kept in pieces (container 'ps3parts'): its name without '.iso' and the piece number
         self.ps3_info = {}             # its game ID, title, region and whether its protected parts are still encrypted
         self.warn = ""                 # something to tell the person when the item is added (it still works as far as it can)
         self.note = ""                 # something to tell the person when it is finished
@@ -4384,6 +4385,8 @@ class Job:
             return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
         if self.container == "ps3folder":           # a PS3 game folder: a disc image of it (RPCS3 loads those), or a CHD of one
             return [(k, target_label(k)) for k in ("iso", "chd")]
+        if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
+            return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
         if self.ps3:                                # a PS3 disc image: a CHD of it, or its files (not while they are still encrypted)
             return [(k, target_label(k)) for k in (("chd",) if self.ps3_info.get("encrypted") else ("chd", "folder"))]
         if self.xbox:                               # an Xbox 360 ISO: a CHD of it, or Xenia's ZAR
@@ -4493,6 +4496,26 @@ class Job:
 
     def _analyze(self):
         p, ext = self.path, self.path.suffix.lower()
+        sp = split_set(p) if not p.is_dir() else None
+        if sp is not None:                          # one piece of a PS3 disc image kept in several files: the whole set is this item
+            stem, pieces, problem = sp
+            if problem:
+                raise ValueError(problem)
+            info = ps3_iso_kind(pieces)
+            if info is None:
+                raise ValueError(f"these {len(pieces)} file(s) ({pieces[0].name}" + (f" … {pieces[-1].name}" if len(pieces) > 1 else "") +
+                                 ") don't join into a PlayStation 3 disc image. Only PlayStation 3 images that were split into pieces can be joined")
+            self.path = self.home = pieces[0]
+            self.split_stem = stem
+            self.container, self.platform, self.types = "ps3parts", "PS3", ["MODE1"]
+            self.ps3, self.ps3_info = True, info
+            self.src_files = pieces
+            self.size = sum(x.stat().st_size for x in pieces)
+            self.auto_type, self.reason = "DVD", f"PS3 disc image in {len(pieces)} piece{'s' if len(pieces) != 1 else ''}"
+            if info["encrypted"]:
+                self.warn = ("this PS3 disc image is still encrypted, so its files can't be unpacked until it has been decrypted with your own "
+                             "disc key. It can still be joined into one ISO, or become a CHD, which store it exactly as it is")
+            return
         if p.is_dir():
             info = ps3_folder_info(p)
             if info is not None:                    # a PS3 game folder (PS3_GAME with a PARAM.SFO)
@@ -4653,7 +4676,8 @@ class Job:
         return self.disc or self.type
 
     def row(self):
-        return (self.path.name, self.action_label(), self.platform, self.type_label(),
+        name = self.path.name + (f"  (+{len(self.src_files) - 1} more)" if self.container == "ps3parts" and len(self.src_files) > 1 else "")
+        return (name, self.action_label(), self.platform, self.type_label(),
                 fmt_size(self.size), self.status, self.result, str(self.path.parent))
 
 
@@ -5224,6 +5248,85 @@ class _P3Parts:
     def close(self):
         for f in self.files:
             f.close()
+
+
+_SPLIT_NAME = re.compile(r"^(?P<pre>.+?)(?P<iso>\.iso)?\.(?P<n>666\d\d|\d{1,2})$", re.I)
+
+
+def split_set(path):
+    """A file that is one piece of a disc image kept in several files -> (the image's name without '.iso', [every piece in order], problem).
+    The two ways pieces are named: 'Game.iso.0', 'Game.iso.1' ... (PS3 tools), and 'Game.66600', 'Game.66601' ... (multiMAN, which may
+    also write 'Game.iso.66600'). problem is '' when the set is whole, else a plain sentence saying which piece is missing (pieces is then []).
+    None for any other file."""
+    p = Path(path)
+    m = _SPLIT_NAME.match(p.name)
+    if not m:
+        return None
+    pre, iso, n = m.group("pre"), m.group("iso") or "", m.group("n")
+    mm = n.startswith("666") and len(n) == 5
+    if not mm and not iso:                      # 'Game.0' alone could be anything; only 'Game.iso.0' is a piece
+        return None
+    shape = re.compile("^" + re.escape(pre + iso) + (r"\.666(\d\d)" if mm else r"\.(\d{1,2})") + "$", re.I)
+    have = {}
+    try:
+        for e in os.scandir(p.parent):
+            k = shape.match(e.name)
+            if k and e.is_file():
+                have[int(k.group(1))] = Path(e.path)
+    except OSError:
+        return None
+    mine = int(n[3:]) if mm else int(n)
+    if mine not in have:
+        have[mine] = p
+    top = max(have)
+    gaps = [i for i in range(top + 1) if i not in have]
+    label = (lambda i: f"{pre}{iso}.666{i:02d}") if mm else (lambda i: f"{pre}{iso}.{i}")
+    if gaps:
+        return pre, [], (f"the piece {label(gaps[0])} is missing, and a disc image can only be joined when every piece is there "
+                         f"(found {len(have)} of {top + 1}; put all of the pieces in one folder)")
+    return pre, [have[i] for i in range(top + 1)], ""
+
+
+def split_first(path):
+    """The first piece of the set a file belongs to (the file itself when the set can't be worked out)."""
+    sp = split_set(path)
+    return sp[1][0] if sp and sp[1] else Path(path)
+
+
+def join_pieces(pieces, dest, prog, stopped, verify=False):
+    """Copy the pieces one after the other into one file. With verify, the finished file is read back and compared with what was copied."""
+    total = sum(os.path.getsize(x) for x in pieces) or 1
+    span = 0.5 if verify else 1.0
+    h, done = hashlib.sha1(), 0
+    with open(dest, "wb") as g:
+        for x in pieces:
+            with open(x, "rb") as f:
+                while True:
+                    b = f.read(1 << 20)
+                    if not b:
+                        break
+                    g.write(b)
+                    h.update(b)
+                    done += len(b)
+                    prog(done / total * span)
+                    if stopped():
+                        raise UnpackError("stopped")
+    if os.path.getsize(dest) != total:
+        raise UnpackError("the joined file came out a different size than its pieces together; it was discarded")
+    if verify:
+        h2, done = hashlib.sha1(), 0
+        with open(dest, "rb") as f:
+            while True:
+                b = f.read(1 << 20)
+                if not b:
+                    break
+                h2.update(b)
+                done += len(b)
+                prog(0.5 + done / total * 0.5)
+                if stopped():
+                    raise UnpackError("stopped")
+        if h.digest() != h2.digest():
+            raise UnpackError("the joined file didn't match its pieces when it was read back; it was discarded")
 
 
 def _p3_open(src):
@@ -7685,6 +7788,9 @@ class App:
                 self.log(f"{p.name} belongs to {picked[str(p).lower()]}, so it is not added on its own.", "info")
             elif p.suffix.lower() in ARCHIVE_EXTS:
                 found.append((p, None))
+            elif split_set(p) is not None:                  # one piece of a split PS3 disc image: the first piece stands for the whole set
+                if (split_first(p), None) not in found:
+                    found.append((split_first(p), None))
             elif p.suffix.lower() in SRC_EXTS | {".chd"}:
                 found.append((image_primary(p), None))
             else:
@@ -7936,9 +8042,15 @@ class App:
             e = f.suffix.lower()
             refs = parse_cue(f) if e == ".cue" else parse_gdi(f) if e == ".gdi" else parse_toc(f) if e == ".toc" else []
             referenced.update(str(r).lower() for r in refs)
+        pieces_seen = set()
         for f in sorted(allf):
             e = f.suffix.lower()
-            if e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
+            if split_set(f) is not None:
+                first = split_first(f)
+                if first not in pieces_seen:                # a split image counts once, however many of its pieces are in the folder
+                    pieces_seen.add(first)
+                    found.append(first)
+            elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
                                     ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
@@ -8285,7 +8397,7 @@ class App:
     def out_stem(self, job, o):
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
-        stem = job.home.name if job.container in ("xfolder", "ps3folder") else job.home.stem
+        stem = job.home.name if job.container in ("xfolder", "ps3folder") else job.split_stem if job.container == "ps3parts" else job.home.stem
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
@@ -8351,7 +8463,7 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder")) or t in ("cue_fix", "art", "zar", "folder")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         out = self.output_path(job, o, SPACE_EXT.get(t, ".x"), make=False).parent
@@ -8433,6 +8545,10 @@ class App:
             iso = Path(outdir) / f"{tag}.iso"
             cso_to_iso(job.path, iso, prog, stopped)
             return iso
+        if job.container == "ps3parts":
+            iso = Path(outdir) / f"{tag}.iso"
+            join_pieces(job.src_files, iso, prog, stopped)
+            return iso
         if job.container == "ps3folder":
             if not iso_ok:
                 raise UnpackError("a PS3 disc image is a DVD-style image, and this chdman is too old to make those (get one from MAME 0.255 or later)")
@@ -8485,7 +8601,7 @@ class App:
                         self.post("job", job)
                         self.post("progress", pct)
 
-                self.post("log", f"\n{job.path.name}{label}  [unpacking {job.path.suffix[1:].upper()}]", "info")
+                self.post("log", f"\n{job.path.name}{label}  [{'joining the pieces' if job.container == 'ps3parts' else 'unpacking ' + job.path.suffix[1:].upper()}]", "info")
                 cues.append(self.unpack_job(job, bases[i], out, f"{stem} (Disc {i + 1})" if n > 1 else stem, prog))
         except UnpackError as e:
             if self.stop_flag:
@@ -8536,7 +8652,7 @@ class App:
                         self.post("progress", pct)
 
                 tag = f"{stem} (Disc {i + 1})" if n > 1 else stem
-                self.post("log", f"\n{job.path.name}{label}  [unpacking {job.path.suffix[1:].upper()}]", "info")
+                self.post("log", f"\n{job.path.name}{label}  [{'joining the pieces' if job.container == 'ps3parts' else 'unpacking ' + job.path.suffix[1:].upper()}]", "info")
                 try:
                     cue = self.unpack_job(job, bases[i], tmp, tag, prog, iso_ok=job.type == "DVD" and self.has_dvd)
                 except UnpackError as e:
@@ -8789,6 +8905,8 @@ class App:
             return self.do_zar_to_iso(job, o)
         if t == "iso" and job.container == "ps3folder":
             return self.do_ps3_to_iso(job, o)
+        if t == "iso" and job.container == "ps3parts":
+            return self.do_join_ps3(job, o)
         if t == "zar":
             return self.do_to_zar(job, o)
         if t == "folder":
@@ -8831,7 +8949,7 @@ class App:
 
             unp = tmp / "unp"
             unp.mkdir()
-            self.post("log", f"\n{job.path.name}  [unpacking {job.path.suffix[1:].upper()}]", "info")
+            self.post("log", f"\n{job.path.name}  [{'joining the pieces' if job.container == 'ps3parts' else 'unpacking ' + job.path.suffix[1:].upper()}]", "info")
             try:
                 base = pbp_discs(job.path)[0] if job.container == "pbp" else None
                 src = self.unpack_job(job, base, unp, job.home.stem, prog, iso_ok=True)
@@ -9184,6 +9302,36 @@ class App:
         if o["delete_src"]:
             self.remove_sources(job, o)
 
+    def do_join_ps3(self, job, o):
+        """The pieces of a split PS3 disc image -> one ISO."""
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        n = len(job.src_files)
+        self.post("log", f"\n{job.path.name}  [joining {n} piece{'s' if n != 1 else ''} → one ISO]", "info")
+        try:
+            join_pieces(job.src_files, part, self.cso_progress(job, "Joining"), lambda: self.stop_flag, verify=self.verify_wanted())
+            os.replace(part, out)
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't join)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({n} piece{'s' if n != 1 else ''}, {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"] and self.verify_wanted():
+            self.remove_sources(job, o)
+
     def unpack_entries(self, job, ents, read, dest, prog, enc, readback):
         """Write the files of a disc image or archive into the folder dest. A name this computer can't use is changed (and listed in the
         log and in the finished row) instead of stopping the whole disc. With 'verify' on, what was written is read back against the
@@ -9239,7 +9387,7 @@ class App:
         """The files of a disc image (or a ZAR) -> a game folder: Xbox 360, PlayStation 3, or any other plain ISO 9660 disc."""
         if iso is None and job.container in ("zar", "xfolder"):
             return self.xbox_to_folder(job, dest, prog)
-        path = iso or job.path
+        path = iso or (job.src_files if job.container == "ps3parts" else job.path)
         if ps3_iso_kind(path) is not None:
             return self.ps3_to_folder(job, dest, prog, path)
         if xbox_iso_kind(path) in ("360", "xbox"):
