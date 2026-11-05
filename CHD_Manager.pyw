@@ -22,6 +22,7 @@ import platform
 import queue
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -45,7 +46,7 @@ SETTINGS_FILE = HERE / "chd_manager_settings.json"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -101,6 +102,20 @@ def lerp_hex(c1, c2, t):
 
 
 # --------------------------------------------------------------------------- helpers
+def open_folder(path, select=False):
+    """Show a folder (or, with select, the file inside it) in the system's file manager."""
+    path = str(path)
+    if os.name == "nt":
+        if select:
+            subprocess.Popen(["explorer", "/select,", path])
+        else:
+            os.startfile(path)
+        return
+    target = str(Path(path).parent) if select else path
+    subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", target], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def fmt_size(n):
     n = float(n or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -119,7 +134,7 @@ def fmt_time(sec):
 
 
 def find_chdman(saved=""):
-    for cand in (saved, str(HERE / "chdman.exe")):
+    for cand in (saved, str(HERE / "chdman.exe"), str(HERE / "chdman")):
         if cand and Path(cand).is_file():
             return str(Path(cand))
     from shutil import which
@@ -197,7 +212,7 @@ def find_7z():
     for c in (r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe"):
         if Path(c).is_file():
             return c
-    return shutil.which("7z")
+    return shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
 
 
 def install_7zip():
@@ -248,13 +263,59 @@ def _kind_from_tags(text):
     return "Raw"
 
 
+def ref_path(folder, name):
+    """folder/name. Windows ignores upper/lower case in file names and Linux does not, so when the exact name isn't there
+    but one that differs only in case is, that one is used (a CUE saying game.bin next to GAME.BIN)."""
+    f = folder / name
+    if os.name != "nt" and not f.exists():
+        try:
+            low = name.lower()
+            for c in folder.iterdir():
+                if c.name.lower() == low:
+                    return c
+        except OSError:
+            pass
+    return f
+
+
+def case_fixed_sheet(path):
+    """Linux: chdman wants the file names in a .cue/.gdi/.toc spelled exactly as they are on disk. When some differ only in
+    upper/lower case, write a temporary copy with the real names and return it (the caller deletes it); None when nothing needs fixing."""
+    path = Path(path)
+    pat = {".cue": r'(\s*FILE\s+)(?:"([^"]+)"|(\S+))(.*)', ".gdi": r'(\s*\d+\s+\d+\s+\d+\s+\d+\s+)(?:"([^"]+)"|(\S+))(.*)',
+           ".toc": r'(.*?(?:DATA)?FILE\s+)(?:"([^"]+)")()(.*)'}.get(path.suffix.lower())
+    if os.name == "nt" or not pat:
+        return None
+    try:
+        lines = path.read_text("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    changed = False
+    for i, line in enumerate(lines):
+        if path.suffix.lower() == ".gdi" and i == 0:
+            continue
+        m = re.match(pat, line, re.I)
+        if not m:
+            continue
+        name = m.group(2) or m.group(3)
+        real = ref_path(path.parent, name).name
+        if real != name and (path.parent / real).exists():
+            lines[i] = f'{m.group(1)}"{real}"{m.group(4)}'
+            changed = True
+    if not changed:
+        return None
+    out = path.with_name(f".{path.stem}.__chdm_case__{path.suffix}")
+    out.write_text("\n".join(lines) + "\n", "utf-8")
+    return out
+
+
 def parse_cue(p):
     refs = []
     try:
         for line in p.read_text("utf-8", "replace").splitlines():
             m = re.match(r'\s*FILE\s+(?:"([^"]+)"|(\S+))', line, re.I)
             if m:
-                refs.append(p.parent / (m.group(1) or m.group(2)))
+                refs.append(ref_path(p.parent, m.group(1) or m.group(2)))
     except OSError:
         pass
     return refs
@@ -266,7 +327,7 @@ def parse_gdi(p):
         for line in p.read_text("utf-8", "replace").splitlines()[1:]:
             m = re.match(r'\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(\S+))', line)
             if m:
-                refs.append(p.parent / (m.group(1) or m.group(2)))
+                refs.append(ref_path(p.parent, m.group(1) or m.group(2)))
     except OSError:
         pass
     return refs
@@ -278,7 +339,7 @@ def parse_toc(p):
         for line in p.read_text("utf-8", "replace").splitlines():
             m = re.search(r'(?:DATA)?FILE\s+"([^"]+)"', line, re.I)
             if m:
-                refs.append(p.parent / m.group(1))
+                refs.append(ref_path(p.parent, m.group(1)))
     except OSError:
         pass
     return refs
@@ -295,7 +356,7 @@ def cue_data_start(p):
             t = line.strip()
             m = re.match(r'FILE\s+(?:"([^"]+)"|(\S+))', t, re.I)
             if m:
-                cur_file = p.parent / (m.group(1) or m.group(2))
+                cur_file = ref_path(p.parent, m.group(1) or m.group(2))
                 continue
             m = re.match(r"TRACK\s+\d+\s+(\S+)", t, re.I)
             if m:
@@ -373,8 +434,8 @@ def decide_type(ext, size, platform):
     """-> (CD|DVD, reason)"""
     if ext in (".cue", ".gdi", ".toc", ".bin"):
         return "CD", "CUE/GDI/TOC images are CD-based"
-    if ext in (".pbp", ".cdi"):
-        return "CD", "PBP and CDI images are CD-based"
+    if ext in (".pbp", ".cdi", ".vcd"):
+        return "CD", "PBP, CDI and VCD images are CD-based"
     if platform == "PSP":
         return "DVD", "PSP UMD image"
     if size <= CD_MAX_BYTES:
@@ -389,11 +450,31 @@ class _SHFILEOPSTRUCTW(ctypes.Structure):
                 ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
 
 
+def _trash_posix(paths):
+    """Send files to the desktop's trash (recoverable) with the tools a Linux desktop has, or macOS's Finder; False if none worked."""
+    if sys.platform == "darwin":
+        for p in paths:
+            script = 'tell application "Finder" to delete POSIX file "%s"' % p.replace("\\", "\\\\").replace('"', '\\"')
+            if subprocess.run(["osascript", "-e", script], capture_output=True).returncode != 0:
+                return False
+        return True
+    for tool in (["gio", "trash"], ["trash-put"], ["kioclient5", "move"], ["kioclient", "move"]):
+        if shutil.which(tool[0]):
+            ok = True
+            for p in paths:
+                cmd = tool + [p] + (["trash:/"] if tool[0].startswith("kioclient") else [])
+                ok = subprocess.run(cmd, capture_output=True, stdin=subprocess.DEVNULL).returncode == 0 and ok
+            return ok
+    return False
+
+
 def recycle(paths):
     """Send files to the Recycle Bin (recoverable). Returns True on success."""
     paths = [str(p) for p in paths if Path(p).exists()]
     if not paths:
         return True
+    if os.name != "nt":
+        return _trash_posix(paths)
     joined = "\0".join(paths) + "\0\0"
     buf = ctypes.create_unicode_buffer(joined, len(joined) + 1)
     op = _SHFILEOPSTRUCTW()
@@ -521,6 +602,17 @@ def write_swap_script(new_exe, old_exe):
 
 # ------------------------------------------------------------------ smart suggestions
 def total_ram_gb():
+    if os.name != "nt":
+        try:
+            if sys.platform == "darwin":
+                return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 1024 ** 3
+            for line in open("/proc/meminfo"):
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 1024 ** 2
+        except (OSError, ValueError):
+            pass
+        return None
+
     class MEMSTAT(ctypes.Structure):
         _fields_ = [("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
                     ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
@@ -830,7 +922,7 @@ def unpack_cdi(path, outdir, stem, progress, stopped):
 
 
 # ------------------- MDS/MDF, NRG, CloneCD and plain IMG: read into a track list, unpacked to CUE/BIN
-IMAGE_EXTS = {".mds", ".mdf", ".nrg", ".ccd", ".img"}
+IMAGE_EXTS = {".mds", ".mdf", ".nrg", ".ccd", ".img", ".vcd"}
 VALID_STRIDES = (2048, 2336, 2352, 2368, 2448)
 
 
@@ -1039,9 +1131,140 @@ def image_primary(path):
     return path
 
 
+# ------------------------------------------------------------- POPStarter VCD (PlayStation 1 discs on a PS2)
+# A VCD is a 1 MiB header (the table of contents, stored as BCD minute/second/frame positions that count from the
+# start of the lead-in, so 150 sectors more than the file position) followed by the raw 2352-byte sectors of the disc.
+VCD_HEADER = 0x100000
+VCD_SIGNATURE = b"\x6b\x48\x6e\x20"
+
+
+def _vcd_msf(b):
+    if len(b) != 3 or any((x & 15) > 9 or (x >> 4) > 9 for x in b):
+        raise UnpackError("this VCD's track table is damaged")
+    return (_unbcd(b[0]) * 60 + _unbcd(b[1])) * 75 + _unbcd(b[2])
+
+
+def vcd_header_tracks(h):
+    """The track table of a VCD header -> [(type byte, INDEX 00 sector, INDEX 01 sector)], sectors as stored (+150)."""
+    if len(h) < 1040 or h[2] != 0xA0 or h[12] != 0xA1 or h[22] != 0xA2:
+        raise UnpackError("this isn't a PlayStation 1 VCD file")
+    if (h[17] >> 4) > 9 or (h[17] & 15) > 9 or not 1 <= _unbcd(h[17]) <= 99:
+        raise UnpackError("this VCD's track count is damaged")
+    out = []
+    for i in range(_unbcd(h[17])):
+        o = 30 + 10 * i
+        if h[o] not in (0x41, 0x01) or h[o + 2] != _bcd(i + 1):
+            raise UnpackError("this VCD's track table is damaged")
+        out.append((h[o], _vcd_msf(h[o + 3:o + 6]), _vcd_msf(h[o + 7:o + 10])))
+    return out
+
+
+def read_vcd(path):
+    """A POPStarter .vcd -> the track list read_image works with (the data follows the 1 MiB header)."""
+    path = Path(path)
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        h = f.read(VCD_HEADER)
+        ents = vcd_header_tracks(h)
+        if size <= VCD_HEADER or (size - VCD_HEADER) % 2352:
+            raise UnpackError("this VCD isn't made of whole 2352-byte sectors")
+        total = (size - VCD_HEADER) // 2352
+        starts = [e[2] - 150 for e in ents]
+        if starts[0] != 0 or any(b <= a for a, b in zip(starts, starts[1:])) or starts[-1] >= total:
+            raise UnpackError("this VCD's track positions don't fit its data")
+        return [_mk_track(path, f, size, VCD_HEADER + s * 2352, 2352, (starts[i + 1] if i + 1 < len(starts) else total) - s,
+                          "AUDIO" if ents[i][0] == 0x01 else None) for i, s in enumerate(starts)]
+
+
+def _cue_index00(cue):
+    """{track number: INDEX 00 sector} of a .cue (only those that have one); PREGAP/POSTGAP lines make it refuse."""
+    out, n = {}, 0
+    for line in Path(cue).read_text("utf-8", "replace").splitlines():
+        t = line.strip()
+        if re.match(r"(PREGAP|POSTGAP)\b", t, re.I):
+            raise UnpackError("this disc uses PREGAP/POSTGAP lines, which a VCD can't hold reliably")
+        m = re.match(r"TRACK\s+(\d+)", t, re.I)
+        if m:
+            n = int(m.group(1))
+        m = re.match(r"INDEX\s+00\s+(\d+):(\d+):(\d+)", t, re.I)
+        if m and n:
+            out[n] = (int(m.group(1)) * 60 + int(m.group(2))) * 75 + int(m.group(3))
+    return out
+
+
+def vcd_header(cue):
+    """Build the 1 MiB header for the single-BIN .cue chdman writes. Returns (header, bin path, sectors)."""
+    binf, tracks = cue_tracks(cue)
+    if tracks[0]["type"] != "MODE2/2352" or any(t["type"] not in ("MODE2/2352", "AUDIO") for t in tracks[1:]):
+        raise UnpackError("a VCD can only hold a PlayStation 1 disc (MODE2/2352 data, then audio)")
+    if len(tracks) > 99 or tracks[0]["idx"] != 0:
+        raise UnpackError("this disc's track layout can't be put in a VCD")
+    size = binf.stat().st_size
+    if size % 2352 or not size:
+        raise UnpackError("the disc data isn't made of whole 2352-byte sectors")
+    total = size // 2352
+    idx0 = _cue_index00(cue)
+    h = bytearray(VCD_HEADER)
+    ct = 0x01 if tracks[-1]["type"] == "AUDIO" else 0x41
+    h[0], h[2], h[7], h[8] = 0x41, 0xA0, 0x01, 0x20
+    h[10], h[12], h[17], h[20] = ct, 0xA1, _bcd(len(tracks)), ct
+    h[22] = 0xA2
+    lead = total + 150
+    h[27:30] = bytes((_bcd(lead // 4500), _bcd(lead // 75 % 60), _bcd(lead % 75)))
+    for i, t in enumerate(tracks):
+        o = 30 + 10 * i
+        i1 = t["idx"] + 150
+        i0 = (idx0.get(i + 1, t["idx"]) + 150) if i else idx0.get(1, t["idx"])
+        h[o] = 0x01 if t["type"] == "AUDIO" else 0x41
+        h[o + 2] = _bcd(i + 1)
+        h[o + 3:o + 6] = bytes((_bcd(i0 // 4500), _bcd(i0 // 75 % 60), _bcd(i0 % 75)))
+        h[o + 7:o + 10] = bytes((_bcd(i1 // 4500), _bcd(i1 // 75 % 60), _bcd(i1 % 75)))
+    h[1024:1028] = VCD_SIGNATURE
+    h[1032:1036] = h[1036:1040] = total.to_bytes(4, "little")
+    return bytes(h), binf, total
+
+
+def write_vcd(out_path, cue, progress, stopped):
+    """CD CHD (extracted to cue/bin) -> POPStarter .vcd."""
+    h, binf, total = vcd_header(cue)
+    done = 0
+    with open(binf, "rb") as f, open(out_path, "wb") as g:
+        g.write(h)
+        while True:
+            raw = f.read(2048 * 2352)
+            if not raw:
+                break
+            g.write(raw)
+            done += len(raw) // 2352
+            progress(done / total)
+            if stopped():
+                raise UnpackError("stopped")
+
+
+def verify_vcd(out_path, cue, progress, stopped):
+    """Read the finished VCD back: same header as would be written now, and every sector equal to the disc's."""
+    h, binf, total = vcd_header(cue)
+    done = 0
+    with open(out_path, "rb") as f, open(binf, "rb") as b:
+        if f.read(VCD_HEADER) != h:
+            return False
+        while True:
+            a, raw = f.read(2048 * 2352), b.read(2048 * 2352)
+            if a != raw:
+                return False
+            if not a:
+                return True
+            done += len(a) // 2352
+            progress(done / total)
+            if stopped():
+                raise UnpackError("stopped")
+
+
 def read_image(path):
     path = Path(path)
     ext = path.suffix.lower()
+    if ext == ".vcd":
+        return read_vcd(path)
     if ext == ".mds":
         return read_mds(path)
     if ext == ".nrg":
@@ -2231,7 +2454,7 @@ def open_disc(path):
         return WbfsDisc(path)
     if h[:4] == b"WUX0":
         return WuxDisc(path)
-    if h[:4] == b"CISO" and struct.unpack("<I", h[4:8])[0] != 24:
+    if h[:4] == b"CISO" and ciso_is_wii(struct.unpack("<I", h[4:8])[0]):
         return CisoDisc(path)
     if h[:4] == GCZ_MAGIC:
         return GczDisc(path)
@@ -2337,7 +2560,7 @@ def find_dolphintool(configured=""):
     directly inside the usual program folders. Nothing else is searched."""
     cands = [Path(configured)] if configured else []
     cands += [HERE / "DolphinTool.exe", HERE / "Dolphin" / "DolphinTool.exe", HERE / "Dolphin-x64" / "DolphinTool.exe"]
-    w = shutil.which("DolphinTool.exe")
+    w = shutil.which("DolphinTool.exe") or shutil.which("dolphin-tool") or shutil.which("DolphinTool")
     if w:
         cands.append(Path(w))
     for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
@@ -3602,18 +3825,31 @@ def verify_cdi(out_path, cue, progress, stopped):
 
 
 # ------------------------------------------------------------------ CSO (compressed ISO, used for PSP games)
+def ciso_is_wii(field):
+    """Both CISO kinds start with 'CISO' and a 32-bit number. A PSP CSO has its header size there (24, but many tools write 0
+    or leave junk); a GameCube/Wii CISO has its block size, a power of two of 32 KiB or more (Dolphin writes 2 MiB)."""
+    return field >= 0x8000 and field & (field - 1) == 0
+
+
 def read_cso_header(path):
-    """-> (size of the ISO in bytes, block size, offset shift). Works for CSO (deflate) and ZSO (LZ4)."""
+    """-> (size of the ISO in bytes, block size, offset shift). Works for CSO (version 1 and maxcso's version 2) and ZSO (LZ4)."""
     with open(path, "rb") as f:
         h = f.read(24)
     if len(h) < 24 or h[:4] not in (b"CISO", b"ZISO"):
         raise UnpackError("this is not a CSO or ZSO file")
     hsize, total, block, ver, shift = struct.unpack("<IQIBB2x", h[4:])
-    if h[:4] == b"CISO" and hsize != 24:
+    if h[:4] == b"CISO" and ciso_is_wii(hsize):
         raise UnpackError("this is a GameCube/Wii CISO, not a PSP CSO")
-    if ver > 1 or block < 512 or block & (block - 1) or shift > 8 or not total:
+    if ver > (2 if h[:4] == b"CISO" else 1) or block < 512 or block & (block - 1) or shift > 8 or not total:
         raise UnpackError("this CSO uses a version or layout CHD Manager can't read")
     return total, block, shift
+
+
+def cso_version(path):
+    """1 or 2: the layout version of a CSO (a ZSO is always 1)."""
+    with open(path, "rb") as f:
+        h = f.read(24)
+    return 2 if len(h) == 24 and h[:4] == b"CISO" and h[20] == 2 else 1
 
 
 def cso_is_zso(path):
@@ -3627,6 +3863,7 @@ def iter_cso(path):
     lz = cso_is_zso(path)
     n = (total + block - 1) // block
     with open(path, "rb") as f:
+        v2 = f.read(24)[20] == 2 and not lz              # version 2: a block of block_size or more is stored raw; the index's top bit means LZ4
         f.seek(24)
         idx = struct.unpack("<%dI" % (n + 1), f.read(4 * (n + 1)))
         for i in range(n):
@@ -3637,7 +3874,9 @@ def iter_cso(path):
             raw = f.read(end - start)
             need = min(block, total - i * block)
             try:
-                if a & 0x80000000:
+                if v2:
+                    data = raw[:block] if end - start >= block else lz4_decompress(raw, block) if a & 0x80000000 else zlib.decompressobj(-15).decompress(raw)
+                elif a & 0x80000000:
                     data = raw[:block]
                 elif lz:
                     data = lz4_decompress(raw, block)
@@ -3663,9 +3902,10 @@ def cso_to_iso(src, dst, progress, stopped):
     progress(1.0)
 
 
-def iso_to_cso(src, dst, progress, stopped, level=9, lz4=False):
+def iso_to_cso(src, dst, progress, stopped, level=9, lz4=False, v2=False):
     """ISO -> CSO version 1 (blocks raw-deflated) or, with lz4, ZSO (blocks LZ4-compressed): 2048-byte blocks,
-    stored as they are when compressing doesn't shrink them."""
+    stored as they are when compressing doesn't shrink them. With v2, maxcso's experimental version 2 layout
+    (deflate blocks; a block that would take 2048 bytes or more is stored raw and the index bit stays clear)."""
     total, block = os.path.getsize(src), 2048
     n = (total + block - 1) // block
     shift = 0
@@ -3676,7 +3916,7 @@ def iso_to_cso(src, dst, progress, stopped, level=9, lz4=False):
     index = [0] * (n + 1)
     pos = 24 + 4 * (n + 1)
     with open(src, "rb") as f, open(dst, "wb") as g:
-        g.write(struct.pack("<4sIQIBB2x", b"ZISO" if lz4 else b"CISO", 24, total, block, 1, shift) + b"\0" * (4 * (n + 1)))
+        g.write(struct.pack("<4sIQIBB2x", b"ZISO" if lz4 else b"CISO", 24, total, block, 2 if v2 else 1, shift) + b"\0" * (4 * (n + 1)))
         for i in range(n + 1):
             pad = -pos % align
             if pad:
@@ -3691,8 +3931,8 @@ def iso_to_cso(src, dst, progress, stopped, level=9, lz4=False):
             else:
                 c = zlib.compressobj(level, zlib.DEFLATED, -15)
                 comp = c.compress(data) + c.flush()
-            if len(comp) >= block:
-                index[i] = (pos >> shift) | 0x80000000
+            if len(comp) >= block or (v2 and len(comp) + (-(pos + len(comp)) % align) >= block):
+                index[i] = (pos >> shift) | (0 if v2 else 0x80000000)
                 g.write(data)
                 pos += block
             else:
@@ -3822,15 +4062,15 @@ def target_label(key):
 # What a row's Action drop-down can offer. 'auto' is for CHDs that hold something else (hard disk, laserdisc, raw).
 TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/BIN, one BIN per track",
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
-                 "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "cso": "→ CSO (compressed ISO)",
+                 "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
 # how the CHD extraction code names each target
 TARGET_FMT = {"cue": "auto", "cue_split": "split", "cue_single": "single", "iso": "iso", "gdi": "auto", "pbp": "pbp",
-              "cdi": "cdi", "cso": "cso", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
+              "cdi": "cdi", "vcd": "vcd", "cso": "cso", "cso2": "cso2", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
 CUE_TYPE = {"AUDIO": "AUDIO", "MODE1/2048": "MODE1", "MODE1/2352": "MODE1_RAW", "MODE2/2352": "MODE2_RAW"}
 
 
@@ -3849,7 +4089,7 @@ def parse_cue_tracks(p):
             t = line.strip()
             m = re.match(r'FILE\s+(?:"([^"]+)"|(\S+))', t, re.I)
             if m:
-                cur = p.parent / (m.group(1) or m.group(2))
+                cur = ref_path(p.parent, m.group(1) or m.group(2))
                 continue
             m = re.match(r"TRACK\s+\d+\s+(\S+)", t, re.I)
             if m and cur is not None:
@@ -3864,10 +4104,10 @@ def parse_cue_tracks(p):
 SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # What a target's file is, against the size of the unpacked disc. Compressed targets use a typical figure, not the
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
-SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
+SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
 SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "cso": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
 
@@ -3913,6 +4153,7 @@ class Job:
         self.container = None          # "pbp" | "cdi" | "image": unpacked to CUE/BIN before chdman sees it
         self.disc_count = 1            # discs inside a PBP
         self.m3u_chds = []             # for a playlist: its CHD files, one per disc
+        self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
         self.size = 0
         self._raw = None
         self.src_files = []
@@ -3994,9 +4235,9 @@ class Job:
             if self.disc == "CD":
                 keys += ["cue"] if len(ty) <= 1 else ["cue_split", "cue_single"]
                 if single:
-                    keys += ["iso", "cso", "zso"]
+                    keys += ["iso", "cso", "zso", "cso2"]
                 if raw and data[0].startswith("MODE2"):
-                    keys.append("pbp")
+                    keys += ["pbp", "vcd"]
                 if raw:
                     keys.append("cdi")
                 if raw:
@@ -4006,7 +4247,7 @@ class Job:
             elif self.disc == "GD-ROM":
                 keys.append("gdi")
             elif self.disc == "DVD":
-                keys += ["iso", "cso", "zso"]
+                keys += ["iso", "cso", "zso", "cso2"]
             else:
                 keys.append("auto")
             keys.append("verify")
@@ -4022,10 +4263,15 @@ class Job:
                 keys.append("art")
             if ty and self.disc_count == 1:
                 if single:
-                    keys += [k for k, skip in (("iso", ".iso"), ("cso", ".cso"), ("zso", ".zso")) if ext != skip or self.wrap_cue]
+                    keys += [k for k, skip in (("iso", ".iso"), ("cso", ".cso"), ("zso", ".zso")) if ext != skip or self.wrap_cue
+                             or (k == "cso" and self.cso_ver == 2)]
+                    if self.cso_ver != 2:
+                        keys.append("cso2")
                 if raw and self.container != "cso":
                     if self.platform == "PS1" and ext != ".pbp":
                         keys.append("pbp")
+                    if self.platform == "PS1" and ext != ".vcd" and data[0].startswith("MODE2"):
+                        keys.append("vcd")
                     if ext != ".cdi":
                         keys.append("cdi")
                     keys.append("cue_fix")
@@ -4101,6 +4347,7 @@ class Job:
             return
         if ext in (".cso", ".zso", ".ciso"):
             total = read_cso_header(p)[0]
+            self.cso_ver = cso_version(p)
             self.size, self.src_files, self.container, self.types = p.stat().st_size, [p], "cso", ["MODE1"]
             self.platform = cso_platform(p)
             self.auto_type, self.reason = decide_type(".iso", total, "")
@@ -4191,18 +4438,336 @@ class Job:
                 fmt_size(self.size), self.status, self.result, str(self.path.parent))
 
 
+# --------------------------------------------------------------------------- Linux / macOS: what has to be installed, and why
+LINUX_PKGS = {"chdman": {"apt": "mame-tools", "dnf": "mame-tools", "pacman": "mame-tools", "brew": "rom-tools"},
+              "tkdnd": {"apt": "tkdnd", "dnf": "tkdnd"}}
+LINUX_WHY = {
+    "chdman": ("CHD Manager is the friendly front end. chdman, part of MAME's tools, is the program that actually makes and reads "
+               "CHD files, and CHD Manager asks it to do that work. Without chdman nothing can be turned into a CHD or back, and most "
+               "other conversions, which pass through a CHD on the way, won't work either. Only a few direct ones (ISO to and from "
+               "CSO or ZSO, and the GameCube/Wii formats) work without it. There is no official chdman download for Linux or macOS, so "
+               "it has to come from your system's package manager."),
+    "tkdnd": ("Lets you drag files and folders from your file manager onto this window. It is optional: Add Files, Add Folder and "
+              "the right-click menu all work without it."),
+}
+LINUX_NAMES = {"chdman": "chdman (needed for CHD files)", "tkdnd": "Drag and drop (optional)"}
+
+
+def linux_pkg_manager():
+    for pm, tool in (("apt", "apt-get"), ("dnf", "dnf"), ("pacman", "pacman"), ("brew", "brew")):
+        if shutil.which(tool):
+            return pm
+    return None
+
+
+def linux_is_steamos():
+    try:
+        text = Path("/etc/os-release").read_text("utf-8", "replace").lower()
+    except OSError:
+        return False
+    return "steamos" in text
+
+
+def linux_install_command(piece):
+    """The command that installs this piece with the package manager found on this system, or None."""
+    pm = linux_pkg_manager()
+    pkg = LINUX_PKGS[piece].get(pm) if pm else None
+    if not pkg:
+        return None
+    return {"apt": "sudo apt install ", "dnf": "sudo dnf install ", "pacman": "sudo pacman -S ", "brew": "brew install "}[pm] + pkg
+
+
+# --------------------------------------------------------------------------- Linux right-click menu (KDE Dolphin, GNOME Files, "Open with")
+LINUX_MIME = "application/x-chdmanager-disc"
+LINUX_NEW_EXTS = (".pbp", ".vcd", ".zso", ".ecm", ".rvz", ".wia", ".wbfs", ".gcz", ".ciso", ".wux", ".wud", ".gcm", ".nrg", ".mds",
+                  ".mdf", ".ccd")   # types Linux doesn't know: registered as LINUX_MIME (the ones it does know are listed below instead)
+LINUX_SYS_MIMES = ("application/x-iso9660-image", "application/x-cd-image", "application/vnd.efi.iso", "application/vnd.efi.img",
+                   "application/x-cue", "application/x-gd-rom-cue", "application/x-cdrdao-toc", "application/x-discjuggler-cd-image",
+                   "application/x-compressed-iso", "application/x-mame-chd", "application/x-raw-disk-image", "application/x-nrg",
+                   "application/x-gamecube-rom", "application/x-wii-rom", "application/x-gamecube-iso-image",
+                   "application/x-wii-iso-image", "application/x-wbfs")
+LINUX_TO = ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "rvz", "gcz", "wia", "wbfs", "ciso")
+
+
+def linux_data_home():
+    return Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+
+
+def linux_program():
+    """[the command that starts this program] as a list: the launcher script next to it, or python + this script."""
+    here = Path(__file__).resolve()
+    sh = here.with_name("chd-manager.sh")
+    return [str(sh)] if sh.is_file() else [sys.executable, str(here)]
+
+
+def linux_menu_files(prog=None, data=None):
+    """{path: (text, executable)} of every file the Linux right-click menu consists of (all inside the user's own ~/.local/share)."""
+    import shlex
+    prog = prog or linux_program()
+    data = Path(data) if data else linux_data_home()
+    bad = [x for x in prog if re.search(r'["`$\\]|[\n\r]', x)]
+    if bad:
+        raise ValueError("the program's path has characters (a quote, $, ` or \\) that a menu entry can't hold: " + bad[0])
+    ex = " ".join('"%s"' % x for x in prog)                 # desktop-entry style: double-quoted words
+    sh = " ".join(shlex.quote(x) for x in prog)             # shell style, for the Nautilus scripts
+    mimes = ";".join(LINUX_SYS_MIMES + (LINUX_MIME,)) + ";"
+    files = {}
+    files[data / "applications" / "chd-manager.desktop"] = (
+        "[Desktop Entry]\nType=Application\nName=CHD Manager\nComment=Convert game disc images between formats\n"
+        f"Exec={ex} %F\nTerminal=false\nCategories=Utility;\nMimeType={mimes}\n", False)
+    acts = [("convert", "Convert with CHD Manager", "--start"), ("add", "Add to the CHD Manager list", "")]
+    acts += [(f"to_{k}", "Convert to " + TARGET_LABELS[k].replace("→ ", "").strip(), f"--start --to {k}") for k in LINUX_TO]
+    text = ("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n"
+            f"MimeType={mimes}inode/directory;\nX-KDE-Submenu=CHD Manager\nActions={';'.join(a[0] for a in acts)};\n")
+    for key, name, args in acts:
+        text += f"\n[Desktop Action {key}]\nName={name}\nExec={ex} {args + ' ' if args else ''}%F\n"
+    files[data / "kio" / "servicemenus" / "chd-manager.desktop"] = (text, True)
+    files[data / "mime" / "packages" / "chd-manager.xml"] = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">\n'
+        f'  <mime-type type="{LINUX_MIME}">\n    <comment>Game disc image</comment>\n'
+        + "".join(f'    <glob pattern="*{e}"/>\n' for e in LINUX_NEW_EXTS) + "  </mime-type>\n</mime-info>\n", False)
+    for name, args in (("CHD Manager - Convert", "--start"), ("CHD Manager - Add to list", "")):
+        files[data / "nautilus" / "scripts" / name] = (f'#!/bin/sh\nexec {sh} {args + " " if args else ""}"$@"\n', True)
+    return files
+
+
+def linux_menu_installed(data=None):
+    data = Path(data) if data else linux_data_home()
+    return (data / "applications" / "chd-manager.desktop").is_file()
+
+
+def _linux_refresh(data):
+    for cmd in (["update-mime-database", str(data / "mime")], ["update-desktop-database", str(data / "applications")]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+
+def linux_menu_install(data=None, prog=None):
+    data = Path(data) if data else linux_data_home()
+    for path, (text, executable) in linux_menu_files(prog, data).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, "utf-8", newline="\n")
+        path.chmod(0o755 if executable else 0o644)
+    _linux_refresh(data)
+
+
+def linux_menu_remove(data=None):
+    data = Path(data) if data else linux_data_home()
+    for path in linux_menu_files(["x"], data):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    _linux_refresh(data)
+
+
+# --------------------------------------------------------------------------- Windows right-click menu
+CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".pbp", ".cdi", ".vcd", ".ecm", ".m3u", ".chd")
+CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
+               **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
+               **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso")}
+CTX_FOLDER = ("chd", "cue", "iso")                              # what a folder's 'Convert to' offers
+CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
+CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
+CTX_DIR = r"Software\Classes\Directory"
+CTX_TEXT = {False: ("Convert with CHD Manager", "Add to CHD Manager", "Convert with CHD Manager to"),
+            True: ("Convert this folder with CHD Manager", "Add this folder to CHD Manager", "Convert this folder with CHD Manager to")}
+
+
+def ctx_program():
+    """The command that starts this program: the exe, or pythonw + this script when run from source."""
+    if FROZEN:
+        return f'"{sys.executable}"'
+    py = Path(sys.executable)
+    pyw = py.with_name("pythonw.exe")
+    return f'"{pyw if pyw.exists() else py}" "{Path(__file__).resolve()}"'
+
+
+def ctx_roots(base=CTX_BASE, dirbase=CTX_DIR):
+    """[(registry path, formats offered, is a folder)] for every place the menu goes."""
+    return [(rf"{base}\{e}", t, False) for e, t in CTX_TARGETS.items()] + [(dirbase, CTX_FOLDER, True)]
+
+
+def ctx_menu_installed(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
+    if reg is None and os.name != "nt":
+        return linux_menu_installed()
+    if reg is None:
+        import winreg as reg
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, rf"{ctx_roots(base, dirbase)[0][0]}\shell\CHDManager.Convert\command"):
+            return True
+    except OSError:
+        return False
+
+
+def ctx_menu_install(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
+    """Add 'Convert with CHD Manager', 'Convert with CHD Manager to' (a submenu of formats) and 'Add to CHD Manager' to the
+    right-click menu of disc image files and folders (this user only)."""
+    if reg is None and os.name != "nt":
+        return linux_menu_install()
+    if reg is None:
+        import winreg as reg
+    prog = ctx_program()
+    icon = sys.executable if FROZEN else ""
+
+    def put(path, label, command=None, cascade=False):
+        with reg.CreateKeyEx(reg.HKEY_CURRENT_USER, path, 0, reg.KEY_WRITE) as k:
+            if cascade:
+                reg.SetValueEx(k, "MUIVerb", 0, reg.REG_SZ, label)
+                reg.SetValueEx(k, "SubCommands", 0, reg.REG_SZ, "")
+            else:
+                reg.SetValueEx(k, "", 0, reg.REG_SZ, label)
+            if icon and "\\shell\\" not in path.split("CHDManager.", 1)[1]:
+                reg.SetValueEx(k, "Icon", 0, reg.REG_SZ, icon)
+        if command:
+            with reg.CreateKeyEx(reg.HKEY_CURRENT_USER, path + r"\command", 0, reg.KEY_WRITE) as k:
+                reg.SetValueEx(k, "", 0, reg.REG_SZ, command)
+
+    for root, targets, folder in ctx_roots(base, dirbase):
+        conv, add, to = CTX_TEXT[folder]
+        put(rf"{root}\shell\CHDManager.Convert", conv, f'{prog} --start "%1"')
+        put(rf"{root}\shell\CHDManager.Open", add, f'{prog} "%1"')
+        put(rf"{root}\shell\CHDManager.To", to, cascade=True)
+        for i, key in enumerate(targets, 1):
+            put(rf"{root}\shell\CHDManager.To\shell\{i:02d}{key}", TARGET_LABELS[key].replace("→ ", "").strip(),
+                f'{prog} --start --to {key} "%1"')
+
+
+def _ctx_delete_tree(reg, path):
+    try:
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, path) as k:
+            names, i = [], 0
+            while True:
+                try:
+                    names.append(reg.EnumKey(k, i))
+                    i += 1
+                except OSError:
+                    break
+    except OSError:
+        return
+    for n in names:
+        _ctx_delete_tree(reg, rf"{path}\{n}")
+    try:
+        reg.DeleteKey(reg.HKEY_CURRENT_USER, path)
+    except OSError:
+        pass
+
+
+def ctx_menu_remove(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
+    """Take exactly the entries ctx_menu_install made out again (nothing else under those extensions is touched)."""
+    if reg is None and os.name != "nt":
+        return linux_menu_remove()
+    if reg is None:
+        import winreg as reg
+    for root, _targets, folder in ctx_roots(base, dirbase):
+        for key in ("CHDManager.Convert", "CHDManager.Open", "CHDManager.To"):
+            _ctx_delete_tree(reg, rf"{root}\shell\{key}")
+        if not folder:                                              # tidy up the folders if that left them empty (Windows refuses if not)
+            for sub in (rf"{root}\shell", root):
+                try:
+                    reg.DeleteKey(reg.HKEY_CURRENT_USER, sub)
+                except OSError:
+                    pass
+        else:
+            try:
+                reg.DeleteKey(reg.HKEY_CURRENT_USER, rf"{root}\shell")
+            except OSError:
+                pass
+
+
+# One window takes everything the right-click menu sends: the first program to start owns this local port,
+# and any other copy started with files hands them over to it and quits.
+IPC_PORT = 47615
+IPC_HELLO = b"CHDM-OK\n"
+
+
+def ipc_listen():
+    s = socket.socket()
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        s.bind(("127.0.0.1", IPC_PORT))
+        s.listen(16)
+        return s
+    except OSError:
+        s.close()
+        return None
+
+
+def ipc_send(msg, timeout=15):
+    """True when the window that owns the port took the files (a long wait is fine: it may still be starting up)."""
+    try:
+        with socket.create_connection(("127.0.0.1", IPC_PORT), timeout=timeout) as c:
+            c.sendall(json.dumps(msg).encode() + b"\n")
+            return c.makefile("rb").readline() == IPC_HELLO
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------- multi-disc playlists
+M3U_EXTS = (".chd", ".iso", ".cso", ".zso", ".cdi")
+DISC_TAG = re.compile(r"\s*[\(\[]\s*(?:disc|disk|cd)\s*0*(\d{1,2})(?:\s*(?:of|-|/)\s*\d{1,2})?\s*[\)\]]", re.I)
+
+
+def disc_split(name):
+    """'Game (Disc 2) (USA).chd' -> ('Game (USA)', 2); None when the name has no disc tag."""
+    m = DISC_TAG.search(name)
+    if not m:
+        return None
+    base = (name[:m.start()] + name[m.end():]).strip()
+    return re.sub(r"\s{2,}", " ", base), int(m.group(1))
+
+
+def write_m3u_playlists(outputs, exists="Skip"):
+    """For every folder that got a new disc named like 'Game (Disc 1)', write 'Game.m3u' listing the discs of that game
+    found in the folder, in order. Needs two or more different disc numbers. Returns the log lines."""
+    said = []
+    seen = set()
+    for out in outputs:
+        out = Path(out)
+        sp = disc_split(out.stem)
+        if not sp or out.suffix.lower() not in M3U_EXTS or (out.parent, sp[0], out.suffix.lower()) in seen:
+            continue
+        seen.add((out.parent, sp[0], out.suffix.lower()))
+        discs = {}
+        for f in out.parent.iterdir():
+            s2 = disc_split(f.stem) if f.is_file() and f.suffix.lower() == out.suffix.lower() else None
+            if s2 and s2[0] == sp[0]:
+                discs.setdefault(s2[1], f.name)
+        if len(discs) < 2:
+            continue
+        text = "".join(discs[k] + "\n" for k in sorted(discs))
+        pl = out.parent / (sp[0] + ".m3u")
+        try:
+            old = pl.read_text("utf-8") if pl.exists() else None
+        except (OSError, UnicodeDecodeError):
+            old = ""
+        if old == text:
+            continue
+        if old is not None and exists == "Skip":
+            said.append(f"A playlist named {pl.name} already exists, so it was left as it is (Settings, If output exists).")
+            continue
+        pl.write_text(text, "utf-8")
+        said.append(f"OK  {pl.name}  (playlist of {len(discs)} discs)")
+    return said
+
+
 # --------------------------------------------------------------------------- App
 DEFAULTS = {
     "chdman": "", "compression": "Default", "custom_comp": "", "hunk": "", "threads": 0,
-    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True,
+    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
-    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
+    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
 }
 
 
 class App:
-    def __init__(self, root, silent=False, initial_paths=None):
+    def __init__(self, root, silent=False, initial_paths=None, auto_start=False, target=None, listener=None):
         global CHDMAN
         self.root = root
         self.silent = silent
@@ -4239,13 +4804,20 @@ class App:
                 self.log("This chdman is too old to have 'createdvd'. DVD images will fall back to "
                          "'createcd'. Get a newer chdman (MAME 0.255 or later).", "warn")
         else:
-            self.log("chdman.exe not found. Put it next to this script or set it in Settings, Output page.", "err")
+            if os.name == "nt":
+                self.log("chdman.exe not found. Put it next to this script or set it in Settings, Output page.", "err")
+            else:
+                self.log("chdman wasn't found, so CHD files can't be made or read yet. More, 'What to install' says what to do and why.", "err")
         self.latest = None
         self.refresh_suggestions()
         ensure_keys_dir()
         self.refresh_wii()
         if initial_paths:
-            self.root.after(400, lambda: self.add_paths([str(x) for x in initial_paths]))
+            self.root.after(400, lambda: self.handle_external([str(x) for x in initial_paths], auto_start, target))
+        self.ipc_q, self.pending_start, self.start_due = queue.Queue(), [], 0.0
+        if listener is not None:
+            threading.Thread(target=self.ipc_serve, args=(listener,), daemon=True).start()
+            self.root.after(300, self.poll_ipc)
         self.root.after(80, self.pump)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         if self.v["auto_update_check"].get() and not silent:
@@ -4254,6 +4826,8 @@ class App:
             self.root.after(2500, lambda: self.check_app_update_async(manual=False))
         if not silent:
             self.root.after(1200, self.wii_warning)
+            if os.name != "nt" and not CHDMAN and not self.v["linux_help_off"].get():
+                self.root.after(1800, lambda: self.show_linux_setup(auto=True))
 
     # ------------------------------------------------------------------ UI
     def build_ui(self):
@@ -4298,6 +4872,8 @@ class App:
         self.more_menu.add_separator()
         self.more_menu.add_command(label="Info about the selected disc…", command=self.info_selected)
         self.more_menu.add_command(label="Verify the selected CHD files", command=self.verify_selected)
+        if os.name != "nt":
+            self.more_menu.add_command(label="What to install (and why)…", command=self.show_linux_setup)
         self.more_menu.add_separator()
         self.more_menu.add_command(label=self.theme_menu_label(), command=self.toggle_theme)
         self.theme_menu_index = self.more_menu.index("end")
@@ -4309,7 +4885,8 @@ class App:
         foot.pack(fill="x", side="bottom")
         self._footer_note = {"chdman": "", "app": ""}
         self.chdman_btn = ttk.Button(foot, style="Subtle.TButton", command=self.update_clicked)
-        self.chdman_btn.pack(side="left")
+        if os.name == "nt":
+            self.chdman_btn.pack(side="left")
         self.upd_btn = self.chdman_btn                      # (state changes during a chdman update use this name)
         self.app_btn = ttk.Button(foot, style="Subtle.TButton", command=self.app_footer_clicked)
         self.app_btn.pack(side="right")
@@ -4400,7 +4977,7 @@ class App:
         self.logf = ttk.Frame(pw)
         self.logf.rowconfigure(0, weight=1)
         self.logf.columnconfigure(0, weight=1)
-        self.logbox = tk.Text(self.logf, height=9, wrap="word", font=("Consolas", 9), state="disabled")
+        self.logbox = tk.Text(self.logf, height=9, wrap="word", font=("Consolas", 9) if os.name == "nt" else "TkFixedFont", state="disabled")
         ls = ttk.Scrollbar(self.logf, command=self.logbox.yview)
         self.logbox.configure(yscrollcommand=ls.set)
         self.logbox.grid(row=0, column=0, sticky="nsew")
@@ -4501,6 +5078,16 @@ class App:
             row=6, column=0, columnspan=2, sticky="w", padx=(22, 0))
         ttk.Checkbutton(f, text="Auto-create a CUE for a lone .bin (assumes MODE2/2352, typical PS1)",
                         variable=v["auto_cue"]).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(f, text="Make an .m3u playlist for multi-disc games (files named like 'Game (Disc 1)', 'Game (Disc 2)')",
+                        variable=v["make_m3u"]).grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        if os.name == "nt" or sys.platform.startswith("linux"):
+            cf = ttk.LabelFrame(f, text=" Right-click menu in Windows Explorer " if os.name == "nt" else " Right-click menu in your file manager ", padding=10)
+            cf.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            self.ctx_label = ttk.Label(cf, style="Muted.TLabel", wraplength=560, justify="left")
+            self.ctx_label.grid(row=0, column=0, columnspan=2, sticky="w")
+            self.ctx_btn = ttk.Button(cf, command=self.on_ctx_toggle)
+            self.ctx_btn.grid(row=1, column=0, sticky="w", pady=(8, 0))
+            self.refresh_ctx()
 
         # --- Formats (what each file becomes is chosen in its Action column; this tab only holds the extras)
         f = tab("Formats")
@@ -4591,7 +5178,7 @@ class App:
         bf = ttk.Frame(f)
         bf.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Button(bf, text="Copy diagnostics", command=self.copy_diagnostics).pack(side="left")
-        ttk.Button(bf, text="Open program folder", command=lambda: os.startfile(str(HERE))).pack(side="left", padx=8)
+        ttk.Button(bf, text="Open program folder", command=lambda: open_folder(HERE)).pack(side="left", padx=8)
 
 
     # ------------------------------------------------------------------ look & feel
@@ -4825,7 +5412,7 @@ class App:
     def enable_file_drop(self):
         """Let files/folders be dragged from Explorer onto the window. Uses the Windows shell API directly."""
         if os.name != "nt":
-            return
+            return self.enable_file_drop_tkdnd()
         try:
             self.root.update_idletasks()
             user32, shell32 = ctypes.windll.user32, ctypes.windll.shell32
@@ -4867,6 +5454,98 @@ class App:
                 user32.ChangeWindowMessageFilterEx(hwnd, msg, 1, None)
             self.drop_hwnd = hwnd
         except Exception as e:  # noqa: BLE001
+            self.log(f"Drag and drop is unavailable: {e}", "warn")
+
+    dnd_ok = False
+
+    def show_linux_setup(self, auto=False):
+        """Linux and macOS: what this program needs from the system, why, whether it's there, and the command that installs it."""
+        old = getattr(self, "linux_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift()
+                return
+        except tk.TclError:
+            pass
+        w, fr = self.themed_dialog("What to install")
+        self.linux_win = w
+        have = {"chdman": bool(CHDMAN), "tkdnd": self.dnd_ok}
+        ttk.Label(fr, justify="left", wraplength=520, text=(
+            "CHD Manager uses a few things from your system. Here is what each one is for, whether it was found, and the command "
+            "that installs it. The program never installs anything by itself: you copy the command and run it in a terminal, and "
+            "your system asks for your password.")).grid(row=0, column=0, columnspan=2, sticky="w")
+        r = 1
+        if linux_is_steamos():
+            ttk.Label(fr, justify="left", wraplength=520, style="Muted.TLabel", text=(
+                "This looks like a Steam Deck (SteamOS). Its system files are read-only, and a system update removes anything "
+                "installed into them, so these commands may need repeating after an update. Treat this as experimental.")
+                      ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            r += 1
+        for piece in ("chdman", "tkdnd"):
+            box = ttk.LabelFrame(fr, text=f" {LINUX_NAMES[piece]}: {'found' if have[piece] else 'not found'} ", padding=10)
+            box.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+            r += 1
+            ttk.Label(box, justify="left", wraplength=500, text=LINUX_WHY[piece]).grid(row=0, column=0, columnspan=2, sticky="w")
+            if have[piece]:
+                continue
+            cmd = linux_install_command(piece)
+            if cmd is None:
+                ttk.Label(box, justify="left", wraplength=500, style="Muted.TLabel", text=(
+                    "I couldn't match your system's package manager to a package for this. Look for it in your distribution's software "
+                    "list" + (" (on Arch it is only in the AUR)." if piece == "tkdnd" else ", under the name 'mame-tools' or 'chdman'.")
+                )).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+                continue
+            field = ttk.Entry(box, width=48)
+            field.insert(0, cmd)
+            field.state(["readonly"])
+            field.grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+            btn = ttk.Button(box, text="Copy command")
+            btn.grid(row=1, column=1, padx=(8, 0), pady=(8, 0))
+
+            def copy(c=cmd, b=btn):
+                self.root.clipboard_clear()
+                self.root.clipboard_append(c)
+                b.config(text="Copied: paste it in a terminal")
+            btn.config(command=copy)
+        dont = tk.BooleanVar(value=self.v["linux_help_off"].get())
+        ttk.Checkbutton(fr, text="Don't show this at start", variable=dont).grid(row=r, column=0, sticky="w", pady=(14, 0))
+
+        def close():
+            self.v["linux_help_off"].set(dont.get())
+            self.save_settings()
+            w.destroy()
+        ttk.Button(fr, text="Close", style="Accent.TButton", command=close).grid(row=r, column=1, sticky="e", pady=(14, 0))
+        w.protocol("WM_DELETE_WINDOW", close)
+        self.place_dialog(w)
+
+    def enable_file_drop_tkdnd(self):
+        """Linux and macOS: drag and drop through the 'tkdnd' Tcl package when the system has it (Debian/Ubuntu: sudo apt install
+        tkdnd). Without it everything else works; only dragging is missing, and the log says how to get it."""
+        if self.silent:
+            return
+        tcl = self.root.tk
+        try:
+            tcl.eval("package require tkdnd")
+        except tk.TclError:
+            self.log("Drag and drop is off because the optional 'tkdnd' package isn't installed (More, 'What to install' explains). "
+                     "Add Files and Add Folder work as usual.", "info")
+            return
+        self.dnd_ok = True
+        try:
+            cb = self.root.register(lambda data: self.root.after(10, lambda: self.on_files_dropped(list(tcl.splitlist(data)))))
+
+            def walk(w):
+                yield w
+                for c in w.winfo_children():
+                    if not isinstance(c, tk.Toplevel):
+                        yield from walk(c)
+
+            for w in walk(self.root):
+                path = str(w)
+                tcl.eval(f"tkdnd::drop_target register {path} DND_Files")
+                tcl.eval("bind %s <<Drop:DND_Files>> {%s %%D; return %%A}" % (path, cb))
+        except tk.TclError as e:
             self.log(f"Drag and drop is unavailable: {e}", "warn")
 
     def on_files_dropped(self, paths):
@@ -4911,19 +5590,37 @@ class App:
         """[(label, target key)] offered in the Action drop-down of one row: only what can work for that item."""
         return [(label, key) for key, label in job.available_targets()]
 
+    cso2_ok = False
+
+    def confirm_cso2(self):
+        """CSO version 2 plays on a real PSP but not in PPSSPP: say so once, and let the user back out."""
+        if self.silent or self.cso2_ok:
+            return True
+        self.cso2_ok = messagebox.askokcancel(
+            APP_NAME, "CSO version 2 is an experimental layout.\n\nIt has been tested on one real PSP, where it plays. The PPSSPP "
+                      "emulator refuses it ('CSO version too high'), and other emulators and tools may too.\n\n"
+                      "Version 1 (the plain CSO choice) works everywhere. Use version 2 only if you know you need it.\n\nUse version 2?",
+            icon="warning")
+        return self.cso2_ok
+
     def pick_action(self, job, choice):
+        if choice[1] == "cso2" and not self.confirm_cso2():
+            self.close_picker()
+            return
         job.set_target(choice[1])
         self.close_picker()
         self.update_action_labels()
         self.update_status_idle()
 
     GENERIC_TARGETS = (("chd", "→ CHD"), ("cue", "→ CUE/BIN"), ("iso", "→ ISO"), ("pbp", "→ PlayStation PBP"),
-                       ("cdi", "→ DiscJuggler CDI"), ("cso", "→ CSO"), ("zso", "→ ZSO"), ("ecm", "→ ECM"),
+                       ("cdi", "→ DiscJuggler CDI"), ("vcd", "→ POPStarter VCD"), ("cso", "→ CSO"), ("cso2", "→ CSO version 2 (real PSP only)"), ("zso", "→ ZSO"), ("ecm", "→ ECM"),
                        ("rvz", "→ RVZ (Wii / GameCube)"), ("wbfs", "→ WBFS (Wii)"), ("gcz", "→ GCZ"), ("wux", "→ WUX (Wii U)"), ("wud", "→ WUD (Wii U)"), ("verify", "Verify (CHD files)"),
                        ("recompress", "Recompress (CHD files)"))
 
     def set_all_targets(self, key, label):
         """From the Action heading: give every file that can do it the same target; the rest keep their own."""
+        if key == "cso2" and not self.confirm_cso2():
+            return
         done = 0
         for j in self.jobs:
             have = [k for k, _ in j.available_targets()]
@@ -5229,7 +5926,7 @@ class App:
     def add_files_dialog(self):
         files = filedialog.askopenfilenames(
             title="Select disc images or CHD files", initialdir=self.settings.get("last_dir") or None,
-            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.mds *.nrg *.ccd *.img *.m3u *.chd"), ("All files", "*.*")])
+            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.mds *.nrg *.ccd *.img *.m3u *.chd"), ("All files", "*.*")])
         if files:
             self.settings["last_dir"] = str(Path(files[0]).parent)
             self.add_paths(files)
@@ -5356,15 +6053,15 @@ class App:
     def open_selected_folder(self):
         for j in self.selected_jobs()[:1]:
             target = j.out_path or j.path
-            subprocess.Popen(["explorer", "/select,", str(target)])
+            open_folder(target, select=True)
 
     def open_output_folder(self):
         o = self.options()
         if o["out_mode"] == "custom" and o["out_dir"] and Path(o["out_dir"]).is_dir():
-            os.startfile(o["out_dir"])
+            open_folder(o["out_dir"])
         else:
             for j in (self.selected_jobs() or self.jobs)[:1]:
-                os.startfile(str((j.out_path or j.path).parent))
+                open_folder((j.out_path or j.path).parent)
 
     def refresh_job(self, job):
         for iid, j in self.tree_ids.items():
@@ -5468,7 +6165,7 @@ class App:
             referenced.update(str(r).lower() for r in refs)
         for f in sorted(allf):
             e = f.suffix.lower()
-            if e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
+            if e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
                                     ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
@@ -5592,6 +6289,104 @@ class App:
             return
         self.v["base_pbp"].set(p)
 
+    def refresh_ctx(self):
+        on = ctx_menu_installed()
+        self.ctx_btn.config(text="Remove the right-click menu" if on else "Add the right-click menu")
+        if os.name != "nt":
+            self.ctx_label.config(text=(
+                "On. In KDE's Dolphin (the Steam Deck's desktop mode) right-click a disc image or folder and open the 'CHD Manager' menu. "
+                "In GNOME Files (Nautilus) look under Scripts. Most file managers also list CHD Manager under 'Open With'. "
+                "Select several files and they all go into one window." if on else
+                "Off. Turn it on to convert disc images from your file manager's right-click menu (Dolphin, GNOME Files). It only "
+                "adds files inside your own ~/.local/share folder, and this button takes them out again."))
+            return
+        self.ctx_label.config(text=(
+            "On. Right-click a disc image or a folder and choose 'Convert with CHD Manager' to convert it at once, 'Convert with "
+            "CHD Manager to' to pick the format, or 'Add to CHD Manager' to put it in the list. Select several files and they all go "
+            "into one window." if on else
+            "Off. Turn it on to right-click a disc image or a folder and convert it from the menu. It only changes your own Windows "
+            "account (no administrator needed), and this button takes it out again."))
+
+    def on_ctx_toggle(self):
+        try:
+            if ctx_menu_installed():
+                ctx_menu_remove()
+            else:
+                where = "your own Windows account only" if os.name == "nt" else "files inside your own ~/.local/share folder only"
+                if not messagebox.askyesno(APP_NAME, "Add 'Convert with CHD Manager' to the right-click menu of disc image files?\n\n"
+                                           f"This writes to {where}, and nothing about what opens "
+                                           "when you double-click changes. If you move this program's folder, remove the menu "
+                                           "and add it again.", parent=self.settings_win):
+                    return
+                ctx_menu_install()
+        except (OSError, ValueError) as e:
+            messagebox.showerror(APP_NAME, f"The menu could not be changed: {e}", parent=self.settings_win)
+        self.refresh_ctx()
+
+    def ipc_serve(self, srv):
+        """(thread) another copy of the program handing over files from the right-click menu."""
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            try:
+                c.settimeout(5)
+                msg = json.loads(c.makefile("rb").readline(1 << 20))
+                paths = [x for x in msg.get("paths", []) if isinstance(x, str)]
+                to = msg.get("to") if isinstance(msg.get("to"), str) else None
+                self.ipc_q.put((paths, bool(msg.get("start")), to))
+                c.sendall(IPC_HELLO)
+            except (OSError, ValueError, AttributeError):
+                pass
+            finally:
+                c.close()
+
+    def poll_ipc(self):
+        try:
+            while True:
+                self.handle_external(*self.ipc_q.get_nowait())
+        except queue.Empty:
+            pass
+        self.root.after(300, self.poll_ipc)
+
+    def handle_external(self, paths, start=False, to=None):
+        """Files from the right-click menu (or dropped on the program): add them, set the format if one was asked for,
+        and start once nothing more has arrived for a moment, so a whole selection becomes one batch in one window."""
+        before = {id(j) for j in self.jobs}
+        self.add_paths(paths)
+        new = [j for j in self.jobs if id(j) not in before]
+        if to in TARGET_LABELS and new and not (to == "cso2" and not self.confirm_cso2()):
+            for j in new:
+                have = [k for k, _ in j.available_targets()]
+                pick = next((k for k in (("cue", "cue_split") if to == "cue" else (to,)) if k in have), None)
+                if pick:
+                    j.set_target(pick)
+                else:
+                    self.log(f"{j.path.name}: can't be made into {TARGET_LABELS[to].replace('→ ', '')}; it keeps its usual action.", "warn")
+            self.update_action_labels()
+            self.update_status_idle()
+        if start and new:
+            self.pending_start += new
+            self.start_due = time.time() + 1.5
+            self.root.after(400, self.tick_start)
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except tk.TclError:
+            pass
+
+    def tick_start(self):
+        if not self.pending_start:
+            return
+        if self.running or time.time() < self.start_due:
+            self.root.after(500, self.tick_start)
+            return
+        todo = [j for j in self.pending_start if not j.status.startswith("Done")]
+        self.pending_start = []
+        if todo:
+            self.start(todo)
+
     def start(self, only=None):
         if self.running:
             return
@@ -5690,6 +6485,12 @@ class App:
                 stats["fail"] += 1
             self.post("job", job)
         self.post("overall", total, total)
+        if o.get("make_m3u", True):
+            try:
+                for line in write_m3u_playlists([j.out_path for j in todo if j.status.startswith("Done") and j.out_path], o.get("exists", "Skip")):
+                    self.post("log", line, "ok")
+            except Exception:  # noqa: BLE001  (a playlist is a convenience; it must never spoil a finished run)
+                self.post("log", "Could not write the .m3u playlist:\n" + traceback.format_exc(), "warn")
         saved = stats["src"] - stats["out"]
         msg = (f"Finished in {fmt_time(time.time() - t0)}: {stats['ok']} done, {stats['skip']} skipped, "
                f"{stats['fail']} failed.")
@@ -5734,6 +6535,9 @@ class App:
                     pass
         else:
             base = job.home.parent
+        t = (job.target or "").partition("_d")[0]
+        if ext == ".cso" and (t == "cso2" or (t == "cso" and job.container == "cso" and job.path.suffix.lower() == ".cso")):
+            stem = re.sub(r" \(CSO v[12]\)$", "", stem) + (" (CSO v2)" if t == "cso2" else " (CSO v1)")      # never the source's own name: it would be skipped as existing
         if job.kind == "extract" and (multi or o["extract_subfolder"]):
             base = base / stem
         if make:
@@ -5754,13 +6558,13 @@ class App:
             if t == "wbfs" and job.platform == "Wii" and o["wbfs_scrub"] and not WII_KEYS[0]:
                 extra = raw                                  # the scrubbed ISO Dolphin makes first
         elif ext == ".chd":
-            if t in ("cso", "zso", "ecm", "pbp", "cdi", "cue_fix") or (t == "iso" and job.disc == "CD"):
+            if t in ("cso", "cso2", "zso", "ecm", "pbp", "cdi", "vcd", "cue_fix") or (t == "iso" and job.disc == "CD"):
                 extra = raw                                  # extracted to a temporary folder first
         elif job.kind == "convert":
             extra = raw if job.container else 0              # PBP / CDI / images are unpacked first
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
-                     (t in ("cso", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
+                     (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
                      (t == "iso" and job.container == "cso") or t in ("cue_fix", "art")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
@@ -6009,6 +6813,11 @@ class App:
             src = temp_cue
             typ = "CD"
             self.post("log", f"{job.path.name}: created a temporary CUE ({mode}).", "warn" if job.lone_bin and not job.wrap_cue else "info")
+        else:
+            temp_cue = case_fixed_sheet(src)
+            if temp_cue:
+                src = temp_cue
+                self.post("log", f"{job.path.name}: file names differ from the sheet only in upper/lower case; using a corrected temporary copy.", "info")
         try:
             out = self.output_path(job, o, ".chd")
             out, force, skip = self.handle_exists(job, out, o)
@@ -6103,10 +6912,12 @@ class App:
             self.post("log", f"{job.path.name}: cannot read this CHD.", "err")
             return
         fmt = self.fmt_for(job, o)
-        if fmt in ("cso", "zso"):
+        if fmt in ("cso", "cso2", "zso"):
             return self.extract_to_cso(job, o, lz4=fmt == "zso")
         if fmt == "ecm":
             return self.extract_to_ecm(job, o)
+        if fmt == "vcd":
+            return self.extract_to_vcd(job, o)
         if fmt == "fix":
             return self.do_fix(job, o)
         if fmt == "pbp" or job.path.suffix.lower() == ".m3u":
@@ -6166,9 +6977,9 @@ class App:
             return self.do_disc(job, o)
         if t == "cue" and job.container in ("pbp", "cdi", "image", "ecm"):
             return self.do_unpack(job, o)
-        if t in ("cso", "zso") and job.path.suffix.lower() == ".iso" and not job.wrap_cue:
+        if t in ("cso", "cso2", "zso") and job.path.suffix.lower() == ".iso" and not job.wrap_cue:
             return self.do_iso_to_cso(job, o, lz4=t == "zso")
-        if t in ("cso", "zso") and job.container == "cso":
+        if t in ("cso", "cso2", "zso") and job.container == "cso":
             return self.do_cso_convert(job, o, lz4=t == "zso")
         if t == "iso" and job.container == "cso":
             return self.do_cso_to_iso(job, o)
@@ -6231,6 +7042,8 @@ class App:
             src = temp_cue = job.path.with_name(job.path.stem + ".__chdm_auto__.cue")
             temp_cue.write_text(f'FILE "{job.path.name}" BINARY\n  TRACK 01 {job.wrap_cue}\n    INDEX 01 00:00:00\n', "utf-8")
             typ = "CD"
+        elif not job.container and (temp_cue := case_fixed_sheet(src)):
+            src = temp_cue
         elif job.target == "pbp" and src.suffix.lower() == ".iso":
             last = [-1]
 
@@ -6283,7 +7096,11 @@ class App:
     def write_cso_file(self, job, o, iso, part, out, lz4=False):
         """iso -> part (a CSO, or a ZSO), compared against the ISO when verifying is on, then moved to out. True on success."""
         try:
-            iso_to_cso(iso, part, self.cso_progress(job, "Compressing"), lambda: self.stop_flag, lz4=lz4)
+            v2 = (job.target or "").partition("_d")[0] == "cso2"
+            if v2:
+                self.post("log", "CSO version 2: this plays on a real PSP, but the PPSSPP emulator refuses it ('CSO version too high'). "
+                                 "Use version 1 for the emulator.", "warn")
+            iso_to_cso(iso, part, self.cso_progress(job, "Compressing"), lambda: self.stop_flag, lz4=lz4, v2=v2)
             if o["verify_after"] and not verify_cso(part, iso, self.cso_progress(job, "Verifying"), lambda: self.stop_flag):
                 job.status, job.result = "Verify failed", "the finished CSO didn't match the ISO it was made from; it was discarded."
                 self.post("log", f"{job.path.name}: {job.result}", "err")
@@ -6977,6 +7794,64 @@ class App:
                 except OSError:
                     pass
 
+    def extract_to_vcd(self, job, o):
+        """CD CHD -> POPStarter .vcd (PlayStation 1 discs only)."""
+        out = self.output_path(job, o, ".vcd")
+        out, force, skip = self.handle_exists(job, out, o)
+        if skip:
+            return
+        tmp = out.parent / f".{out.stem[:40]}.chdm_tmp"
+        part = out.with_name(out.name + ".part")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        job.out_path = out
+        last = [-1]
+
+        def prog(label, x):
+            pct = int(100 * x)
+            if pct != last[0]:
+                last[0] = pct
+                job.status = f"{label} {pct}%"
+                self.post("job", job)
+                self.post("progress", pct)
+
+        def fail(status, why):
+            job.status, job.result = status, why
+            self.post("log", f"{job.path.name}: {why}", "err")
+
+        try:
+            cue = tmp / "t.cue"
+            cmd = [CHDMAN, "extractcd", "-i", str(job.path), "-o", str(cue), "-f"]
+            self.post("log", f"\n{job.path.name}  [CD → VCD]", "info")
+            self.post("log", "$ " + " ".join(f'"{c}"' if " " in c else c for c in cmd), "cmd")
+            rc = self.run_proc(cmd, job, "Extracting")
+            if self.stop_flag or rc != 0:
+                job.status = "Stopped" if self.stop_flag else f"Failed (code {rc})"
+                return
+            try:
+                write_vcd(part, cue, lambda x: prog("Writing VCD", x), lambda: self.stop_flag)
+                if o["verify_after"] and not verify_vcd(part, cue, lambda x: prog("Verifying", x), lambda: self.stop_flag):
+                    return fail("Verify failed", "the finished VCD didn't match the disc it was made from; it was discarded.")
+            except UnpackError as e:
+                if self.stop_flag:
+                    job.status = "Stopped"
+                    return
+                return fail("Failed (can't write)", str(e))
+            except OSError as e:
+                return fail("Failed (disk)", str(e))
+            os.replace(part, out)
+            job.out_size = out.stat().st_size
+            job.status = "Done"
+            job.result = f"→ {out.name}"
+            self.post("log", f"OK  {out}  ({fmt_size(job.out_size)})", "ok")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if part.exists():
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
+
     def extract_to_iso(self, job, o, to_cso=False, lz4=False):
         """CD CHD -> .iso (or .cso / .zso). Only possible when the disc is one data track; anything else would lose data."""
         out = self.output_path(job, o, (".zso" if lz4 else ".cso") if to_cso else ".iso")
@@ -7101,9 +7976,13 @@ class App:
         self.post("log", f"OK  {out.name}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
 
     def run_proc(self, cmd, job, label, capture=None):
-        flags = CREATE_NO_WINDOW | (0x00004000 if getattr(self, "cur_opts", {}).get("low_priority") else 0)  # BELOW_NORMAL
+        low = bool(getattr(self, "cur_opts", {}).get("low_priority"))
+        if os.name == "nt":
+            extra = dict(creationflags=CREATE_NO_WINDOW | (0x00004000 if low else 0))          # BELOW_NORMAL
+        else:
+            extra = dict(preexec_fn=(lambda: os.nice(10)) if low else None)
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                     bufsize=0, creationflags=flags)
+                                     bufsize=0, **extra)
         buf, last = b"", -1
         self.last_msg = self.reason_msg = ""
         while True:
@@ -7357,6 +8236,12 @@ class App:
 
     # ------------------------------------------------------------------ chdman update
     def check_update_async(self, manual=False):
+        if os.name != "nt":
+            if manual:
+                self.notify("On Linux and macOS chdman comes from your package manager (on Debian, Ubuntu and SteamOS: "
+                            "the 'mame-tools' package), so update it there.")
+            return
+
         def work():
             try:
                 self.post("upd_info", fetch_latest(), "", manual)
@@ -7680,6 +8565,7 @@ def cli_main(argv):
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
     ap.add_argument("--rvz-block", type=int, metavar="KIB", help="RVZ block size in KiB, 32 to 2048 (default 128)")
+    ap.add_argument("--no-m3u", action="store_true", help="don't write .m3u playlists for multi-disc games")
     ap.add_argument("--no-scrub", action="store_true", help="WBFS: keep all data, don't leave out what nothing uses")
     ap.add_argument("--art", metavar="DIR", help="your PBP artwork folder (one subfolder per game)")
     ap.add_argument("--no-cards", action="store_true", help="don't draw title cards for PBPs without artwork")
@@ -7749,6 +8635,8 @@ def cli_main(argv):
             v["rvz_chunk"].set(a.rvz_block * 1024)
         if a.no_scrub:
             v["wbfs_scrub"].set(False)
+        if a.no_m3u:
+            v["make_m3u"].set(False)
         if a.art:
             v["art_dir"].set(a.art)
         if a.base_pbp:
@@ -7842,9 +8730,20 @@ def main():
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:  # noqa: BLE001
             pass
+    files, start, to, args, i = [], False, None, sys.argv[1:], 0
+    while i < len(args):
+        if args[i] == "--start":
+            start = True
+        elif args[i] == "--to" and i + 1 < len(args):
+            to, i = args[i + 1], i + 1
+        elif not args[i].startswith("--"):
+            files.append(os.path.abspath(args[i]))
+        i += 1
+    srv = ipc_listen()                                  # the first copy owns the port; later ones hand their files to it
+    if srv is None and files and ipc_send({"paths": files, "start": start, "to": to}):
+        return
     root = tk.Tk()
-    files = [a for a in sys.argv[1:] if not a.startswith("--")]
-    App(root, initial_paths=files)
+    App(root, initial_paths=files, auto_start=start, target=to, listener=srv)
     root.mainloop()
 
 
