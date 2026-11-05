@@ -5476,12 +5476,18 @@ def fix_file_name(raw, enc="utf-8"):
 
 # ---- writing a disc image
 class _P3Node:
-    __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num")
+    __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num", "stamp")
 
     def __init__(self, name, is_dir, size=0, src=None):
         self.name, self.is_dir, self.size, self.src = name, is_dir, size, src
         self.kids, self.pname, self.jname, self.lba = [], b"", b"", 0
         self.ex, self.dbytes, self.num = {}, {}, {}
+        self.stamp = None                                    # the file's own date (7 bytes), when it has one
+
+
+def _p3_date(t):
+    g = time.gmtime(t)
+    return bytes([min(max(g.tm_year - 1900, 0), 255), g.tm_mon, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec, 0])
 
 
 def _p3_spell(raw, is_dir, used):
@@ -5505,6 +5511,11 @@ def _p3_tree(entries):
         if parent is None:
             raise UnpackError("a file in this game has no folder around it")
         node = _P3Node(parts[-1], not is_file, size if is_file else 0, src)
+        if is_file and isinstance(src, (str, Path)):
+            try:
+                node.stamp = _p3_date(os.stat(src).st_mtime)
+            except (OSError, OverflowError, ValueError):
+                pass
         parent.kids.append(node)
         if not is_file:
             index[parts] = node
@@ -5515,7 +5526,7 @@ def _p3_tree(entries):
         for k in sorted(d.kids, key=lambda x: x.name):
             k.pname = _p3_spell(k.name, k.is_dir, used)
             units = len(k.name.decode("utf-8", "replace").encode("utf-16-be")) // 2
-            if units + (0 if k.is_dir else 2) > 108:
+            if units + (0 if k.is_dir else 2) > 100:
                 raise UnpackError("the name '" + k.name.decode("utf-8", "replace")[:40] + "…' is too long for a PS3 disc image (about 100 characters at most)")
             k.jname = k.name.decode("utf-8", "replace").encode("utf-16-be") + (b"" if k.is_dir else ";1".encode("utf-16-be"))
             if k.is_dir:
@@ -5523,9 +5534,11 @@ def _p3_tree(entries):
     return root
 
 
-def _p3_record(extent, size, flags, name, when):
+def _p3_record(extent, size, flags, name, when, sysuse=True):
+    """One directory record. Real PS3 discs, and the tools that make images of them, end every record with 6 zero bytes of 'system use'
+    after the name's padding (the volume descriptor's own root record is the plain 34 bytes); written the same here."""
     n = len(name)
-    ln = 33 + n + (1 if n % 2 == 0 else 0)
+    ln = 33 + n + (1 if n % 2 == 0 else 0) + (6 if sysuse else 0)
     r = bytearray(ln)
     r[0] = ln
     r[2:10] = struct.pack("<I", extent) + struct.pack(">I", extent)
@@ -5562,7 +5575,7 @@ def _p3_dir_bytes(d, key, parent, when):
             recs.append(_p3_record(k.ex.get(key, 0), k.dbytes.get(key, 0), 2, nm, when))
         else:
             for e, s, fl in _p3_extents(k.lba, k.size):
-                recs.append(_p3_record(e, s, fl, nm, when))
+                recs.append(_p3_record(e, s, fl, nm, k.stamp or when))
     out = bytearray()
     for r in recs:
         room = PS3_SECTOR - len(out) % PS3_SECTOR
@@ -5727,7 +5740,7 @@ def build_ps3_iso(entries, out_base, read, title_id="", progress=lambda x: None,
     head[0x840:0x9F0] = os.urandom(0x1B0)
     head[0x9F0:0xA00] = os.urandom(0x10)
     for key, idx in (("p", 16), ("j", 17)):
-        rr = _p3_record(root.ex[key], root.dbytes[key], 2, b"\0", when)
+        rr = _p3_record(root.ex[key], root.dbytes[key], 2, b"\0", when, sysuse=False)
         head[idx * PS3_SECTOR:(idx + 1) * PS3_SECTOR] = _p3_volume(key == "j", total, ptsz[key], tables[key][0], tables[key][1], rr, stamp)
     head[18 * PS3_SECTOR:18 * PS3_SECTOR + 6] = b"\xffCD001"
     for key in ("p", "j"):
