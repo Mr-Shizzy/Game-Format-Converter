@@ -5442,7 +5442,7 @@ def ps3_folder_source(path, keep_update=False):
             dns[:] = [d for d in dns if d.upper() != "PS3_UPDATE"]
         try:
             for d in shown:
-                ents.append((tuple(x.encode("utf-8") for x in rel + (d,)), False, None, 0))
+                ents.append((tuple(x.encode("utf-8") for x in rel + (d,)), False, Path(dp, d), 0))
             for fn in sorted(fns):
                 fp = Path(dp, fn)
                 if fp.is_file():
@@ -5476,13 +5476,14 @@ def fix_file_name(raw, enc="utf-8"):
 
 # ---- writing a disc image
 class _P3Node:
-    __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num", "stamp")
+    __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num", "stamp", "skey")
 
     def __init__(self, name, is_dir, size=0, src=None):
         self.name, self.is_dir, self.size, self.src = name, is_dir, size, src
         self.kids, self.pname, self.jname, self.lba = [], b"", b"", 0
         self.ex, self.dbytes, self.num = {}, {}, {}
         self.stamp = None                                    # the file's own date (7 bytes), when it has one
+        self.skey = (is_dir, name.decode("utf-8", "replace").upper(), name)       # a folder's contents are listed files first, then folders (as on real discs)
 
 
 def _p3_date(t):
@@ -5511,7 +5512,7 @@ def _p3_tree(entries):
         if parent is None:
             raise UnpackError("a file in this game has no folder around it")
         node = _P3Node(parts[-1], not is_file, size if is_file else 0, src)
-        if is_file and isinstance(src, (str, Path)):
+        if isinstance(src, (str, Path)):
             try:
                 node.stamp = _p3_date(os.stat(src).st_mtime)
             except (OSError, OverflowError, ValueError):
@@ -5567,12 +5568,12 @@ def _p3_dir_bytes(d, key, parent, when):
     """One folder's records (itself, its parent, then its contents in name order), packed so that none crosses a sector.
     Uses the extents and sizes recorded so far (zero before they are known: the length of the records doesn't depend on them)."""
     name = "pname" if key == "p" else "jname"
-    recs = [_p3_record(d.ex.get(key, 0), d.dbytes.get(key, 0), 2, b"\0", when),
-            _p3_record(parent.ex.get(key, 0), parent.dbytes.get(key, 0), 2, b"\1", when)]
-    for k in sorted(d.kids, key=lambda x: getattr(x, name)):
+    recs = [_p3_record(d.ex.get(key, 0), d.dbytes.get(key, 0), 2, b"\0", d.stamp or when),
+            _p3_record(parent.ex.get(key, 0), parent.dbytes.get(key, 0), 2, b"\1", parent.stamp or when)]
+    for k in sorted(d.kids, key=lambda x: x.skey):
         nm = getattr(k, name)
         if k.is_dir:
-            recs.append(_p3_record(k.ex.get(key, 0), k.dbytes.get(key, 0), 2, nm, when))
+            recs.append(_p3_record(k.ex.get(key, 0), k.dbytes.get(key, 0), 2, nm, k.stamp or when))
         else:
             for e, s, fl in _p3_extents(k.lba, k.size):
                 recs.append(_p3_record(e, s, fl, nm, k.stamp or when))
@@ -5694,7 +5695,7 @@ def build_ps3_iso(entries, out_base, read, title_id="", progress=lambda x: None,
             nxt = []
             for d in level:
                 order.append(d)
-                kids = sorted((k for k in d.kids if k.is_dir), key=lambda x: getattr(x, name))
+                kids = sorted((k for k in d.kids if k.is_dir), key=lambda x: x.skey)
                 for k in kids:
                     parents[(key, id(k))] = d
                 nxt += kids
@@ -5721,9 +5722,9 @@ def build_ps3_iso(entries, out_base, read, title_id="", progress=lambda x: None,
     files = []
 
     def walk(d):
-        for k in sorted((x for x in d.kids if not x.is_dir), key=lambda x: x.pname):
+        for k in sorted((x for x in d.kids if not x.is_dir), key=lambda x: x.skey):
             files.append(k)
-        for k in sorted((x for x in d.kids if x.is_dir), key=lambda x: x.pname):
+        for k in sorted((x for x in d.kids if x.is_dir), key=lambda x: x.skey):
             walk(k)
     walk(root)
     first_file = lba
