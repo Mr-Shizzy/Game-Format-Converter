@@ -5443,11 +5443,64 @@ DEFAULTS = {
 }
 
 
+def sentence(text):
+    """A reason as a tidy sentence: capital first letter, full stop at the end."""
+    text = " ".join(str(text).split()).strip()
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    return text if text[-1] in ".!?)" else text + "."
+
+
+def plain_exc(e):
+    """An exception raised while reading a file -> a sentence a person can act on."""
+    if isinstance(e, OSError):
+        return sentence(f"the file couldn't be opened ({e.strerror or e})")
+    if isinstance(e, UnpackError):
+        return sentence(f"CHD Manager can't use this file: {e}")
+    if isinstance(e, ValueError):
+        return sentence(e)
+    return sentence(f"an unexpected problem stopped it ({type(e).__name__}: {e})")
+
+
+def plain_reason(job):
+    """Why a finished item did not become what was asked, in words for the person who clicked Start."""
+    st, r = job.status or "", (job.result or "").strip()
+    if st.startswith("Skipped (exists)"):
+        return sentence("a file or folder with that name is already in the output folder, so nothing was written. "
+                        "Settings, 'If output exists' lets you replace it or keep both")
+    if st.startswith("Failed (missing files)"):
+        return sentence("the files it points to weren't found next to it" + (": " + ", ".join(job.missing) if job.missing else "")
+                        + ". Put them in the same folder, or add the .cue/.gdi that belongs to them")
+    if st == "No CUE":
+        return sentence("this .bin has no .cue sheet describing it. Add the .cue, or turn on creating one automatically "
+                        "(Settings, Convert page)")
+    if st == "Verify failed":
+        if r.upper().startswith("CORRUPT"):
+            return sentence("this CHD is damaged: it failed chdman's checksum test")
+        return sentence(r or "the finished file didn't pass its check, so it was thrown away. Your original was not touched")
+    if st.startswith("Failed (code"):
+        return sentence("the conversion tool (chdman) stopped with an error" + (f": {r}" if r else "") + ". The log has its full output")
+    if st.startswith("Failed (unknown CHD)"):
+        return sentence("this CHD couldn't be read (it may be damaged, or not a disc image)")
+    if st == "Error":
+        return sentence("an unexpected error stopped it. The log has the details")
+    if st.startswith("Failed (disk)") or st.startswith("Failed (disk or file)"):
+        return sentence(f"a disk problem stopped it ({r})" if r else "a disk problem stopped it")
+    if r:
+        return sentence(r)
+    return sentence(st.lower() if st and not st.startswith(("Working", "Queued")) else "it did not finish. The log has the details")
+
+
 class App:
     def __init__(self, root, silent=False, initial_paths=None, auto_start=False, target=None, listener=None):
         global CHDMAN
         self.root = root
         self.silent = silent
+        self.notices = []               # every "this was refused" window (headline, rows, outro); the self-test reads it
+        self._problems = []             # refusals collected while files are being added
+        self.run_jobs = []              # the items of the run in progress
+        self._busy_told = False
         self.echo = None                # the command-line mode prints log lines through this
         self.no_save = False
         self.jobs = []
@@ -6254,6 +6307,7 @@ class App:
     def app_footer_clicked(self):
         if self.running:
             self.status.config(text="Wait for the current jobs to finish before updating CHD Manager.")
+            self.busy_notice("updating CHD Manager")
             return
         if self.app_update_available():
             self.confirm_app_update()
@@ -6313,6 +6367,14 @@ class App:
         self.update_action_labels()
         self.update_status_idle()
         self.status.config(text=f"{done} of {len(self.jobs)} item(s) set to “{label}”; the others can't do that and keep their own choice.")
+        left = [j for j in self.jobs if not j.status.startswith("Done") and j.target not in (key, "cue_split" if key == "cue" else key)]
+        if left and done:
+            self.report_problems(
+                f"{len(left)} item{'s' if len(left) != 1 else ''} can't become “{label}”:",
+                [(j.path.name, sentence(f"this kind of file can't be turned into that, so it keeps its own choice ({target_label(j.target).lstrip('→ ')})")) for j in left],
+                "The other items were changed as you asked.")
+        elif left and not done:
+            self.notify(f"None of the items in the list can become “{label}”, so nothing was changed.")
 
     def close_picker(self):
         pk = getattr(self, "picker", None)
@@ -6422,7 +6484,12 @@ class App:
             self.note_manual_resize()
             return
         """A click on a row's Action cell opens a drop-down with every choice that fits that item."""
-        if self.running or self.tree.identify_region(e.x, e.y) != "cell" or self.tree.identify_column(e.x) != "#2" or e.state & 0x5:
+        if self.tree.identify_region(e.x, e.y) != "cell" or self.tree.identify_column(e.x) != "#2" or e.state & 0x5:
+            return
+        if self.running:
+            if not self._busy_told:                       # once per run, so clicking around never turns into a stream of windows
+                self._busy_told = True
+                self.busy_notice("changing what a file becomes")
             return
         iid = self.tree.identify_row(e.y)
         job = self.tree_ids.get(iid)
@@ -6620,41 +6687,124 @@ class App:
             self.settings["last_dir"] = d
             self.add_paths([d])
 
+    DUP_ITEM, DUP_ARCHIVE = "This is already in the list.", "This archive is already in the list."
+
+    def refuse(self, name, why, tag="err", logline=None):
+        """Something was turned away: the log says so now, and it is collected for one clear window when the batch is done."""
+        self.log(logline or f"{name}: {why}", tag)
+        self._problems.append((name, why))
+
+    def report_problems(self, headline, rows, outro=""):
+        """One window that lists what was refused and why, so nobody has to dig through the log. (The log keeps the details.)
+        The self-test and the command line stay quiet and keep a copy in self.notices."""
+        if not rows:
+            return
+        self.notices.append((headline, list(rows), outro))
+        if self.silent:
+            return
+        shown = rows[:200]
+        body = "\n\n".join(f"{n}\n    {r}" for n, r in shown) + (f"\n\n…and {len(rows) - 200} more (see the log)." if len(rows) > 200 else "")
+        try:
+            w, fr = self.themed_dialog(APP_NAME)
+            w.resizable(True, True)
+            fr.columnconfigure(0, weight=1)
+            fr.rowconfigure(1, weight=1)
+            ttk.Label(fr, text=headline, justify="left", wraplength=560, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+            lines = sum(2 + len(r) // 70 for _n, r in shown) + len(shown)
+            box = tk.Text(fr, width=72, height=max(4, min(16, lines)), wrap="word", relief="flat", padx=8, pady=6,
+                          bg=self.t["field"], fg=self.t["fg"], font=("Segoe UI", 10))
+            sb = ttk.Scrollbar(fr, command=box.yview)
+            box.config(yscrollcommand=sb.set)
+            box.tag_configure("name", font=("Segoe UI", 10, "bold"))
+            for n, r in shown:
+                box.insert("end", n + "\n", "name")
+                box.insert("end", "    " + r + "\n\n")
+            if len(rows) > 200:
+                box.insert("end", f"…and {len(rows) - 200} more (see the log).")
+            box.config(state="disabled")
+            box.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+            sb.grid(row=1, column=1, sticky="ns", pady=(10, 0))
+            if outro:
+                ttk.Label(fr, text=outro, justify="left", wraplength=560, style="Muted.TLabel").grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            bt = ttk.Frame(fr)
+            bt.grid(row=3, column=0, columnspan=2, sticky="e", pady=(14, 0))
+
+            def copy():
+                self.root.clipboard_clear()
+                self.root.clipboard_append(headline + "\n\n" + body)
+                cb.config(text="Copied")
+            cb = ttk.Button(bt, text="Copy", command=copy)
+            cb.pack(side="left", padx=(0, 8))
+            ok = ttk.Button(bt, text="OK", style="Accent.TButton", command=w.destroy)
+            ok.pack(side="left")
+            w.bind("<Return>", lambda _e: w.destroy())
+            w.bind("<Escape>", lambda _e: w.destroy())
+            self.place_dialog(w)
+            w.grab_set()
+            ok.focus_set()
+            w.wait_window()
+        except Exception:  # noqa: BLE001  (a fault while drawing the window must still tell the person)
+            messagebox.showwarning(APP_NAME, headline + "\n\n" + body[:1500])
+
     def add_paths(self, paths):
+        self._problems = []
+        added = 0
+        try:
+            added = self._add_paths(paths) or 0
+        finally:
+            rows, self._problems = self._problems, []
+        if added:                                          # repeats among new items are harmless: the log mentions them, no window
+            rows = [r for r in rows if r[1] not in (self.DUP_ITEM, self.DUP_ARCHIVE)]
+        if rows:
+            n = len(rows)
+            self.report_problems(
+                f"{n} item{'s' if n != 1 else ''} could not be added, or can't be converted yet:", rows,
+                "Nothing on your disk was changed or deleted. Everything else was added as usual; the log has the details.")
+
+    def _add_paths(self, paths):
         found = []   # (path, root)
         for p in map(Path, paths):
             if p.is_dir():
                 files, ignored = self.scan_folder(p)
                 found += [(f, p) for f in files]
+                if not files and not ignored:
+                    self.refuse(p.name, "No disc images were found in this folder (its sub-folders were searched too).", "warn")
                 if ignored:
-                    self.log(f"Ignored {sum(ignored.values())} file(s) ({', '.join(sorted(ignored))}): keep an .mdf next to its .mds.", "warn")
+                    self.refuse(p.name, sentence(f"{sum(ignored.values())} {', '.join(sorted(ignored))} file(s) were left out: an .mdf is only the data half "
+                                                 "of a disc image, and it needs its .mds file next to it"), "warn",
+                                f"Ignored {sum(ignored.values())} file(s) ({', '.join(sorted(ignored))}): keep an .mdf next to its .mds.")
             elif p.suffix.lower() in ARCHIVE_EXTS:
                 found.append((p, None))
             elif p.suffix.lower() in SRC_EXTS | {".chd"}:
                 found.append((image_primary(p), None))
             else:
-                self.log(f"Skipped (unsupported type): {p.name}", "warn")
+                self.refuse(p.name, sentence(f"CHD Manager doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
+                            f"Skipped (unsupported type): {p.name}")
         jobs_from = []   # (file, root, archive, folder it was unpacked into)
         known = {str(j.archive).lower() for j in self.jobs if j.archive}
         for f, root in found:
             if f.suffix.lower() in ARCHIVE_EXTS:
                 if str(f).lower() in known:
+                    self.refuse(f.name, self.DUP_ARCHIVE, "info")
                     continue
                 files, tmp = self.open_archive(f)
                 jobs_from += [(x, None, f, tmp) for x in files]
             else:
                 jobs_from.append((f, root, None, None))
         have = {str(j.path).lower() for j in self.jobs}
+        listed = set(have)
         was_empty = not self.jobs
         added = 0
         for f, root, arc, tmp in jobs_from:
             if str(f).lower() in have:
+                if str(f).lower() in listed:                # a .cue and its .bin picked together are one item: only a real repeat is worth saying
+                    self.refuse(f.name, self.DUP_ITEM, "info")
                 continue
             try:
                 job = Job(f, root)
                 job.analyze()
             except Exception as e:  # noqa: BLE001
-                self.log(f"Could not read {f.name}: {e}", "err")
+                self.refuse(f.name, plain_exc(e), "err", f"Could not read {f.name}: {e}")
                 continue
             if arc:
                 job.archive, job.extract_dir, job.home, job.src_files = arc, tmp, arc.parent / f.name, [arc]
@@ -6665,7 +6815,9 @@ class App:
             self.tree_ids[iid] = job
             added += 1
             if job.missing:
-                self.log(f"{job.path.name}: missing referenced file(s): {', '.join(job.missing)}", "warn")
+                self.refuse(job.path.name, sentence("it was added, but it won't convert: the files it points to weren't found next to it ("
+                                                   + ", ".join(job.missing) + ")"), "warn",
+                            f"{job.path.name}: missing referenced file(s): {', '.join(job.missing)}")
         self.refresh_empty()
         self.log(f"Added {added} item(s).", "info")
         self.update_action_labels()
@@ -6674,6 +6826,7 @@ class App:
             self.log("Click the Action cell of a file to choose what it becomes; click the Action heading to set them all.", "info")
         if added:
             self.refresh_suggestions(first_add=was_empty)
+        return added
 
     def refresh_empty(self):
         if self.jobs:
@@ -6684,8 +6837,12 @@ class App:
     def selected_jobs(self):
         return [self.tree_ids[i] for i in self.tree.selection() if i in self.tree_ids]
 
+    def busy_notice(self, what):
+        self.notify(f"A conversion is running, so {what} has to wait. Let it finish, or press Stop first.")
+
     def remove_selected(self):
         if self.running:
+            self.busy_notice("removing files")
             return
         for iid in self.tree.selection():
             job = self.tree_ids.pop(iid, None)
@@ -6702,6 +6859,7 @@ class App:
 
     def clear_all(self):
         if self.running:
+            self.busy_notice("clearing the list")
             return
         self.tree.delete(*self.tree.get_children())
         self.tree_ids.clear()
@@ -6915,15 +7073,16 @@ class App:
                     raise RuntimeError((r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:] or f"7-Zip exited with {r.returncode}")
         if ext in (".7z", ".rar") and not find_7z() and not self.silent and not self.ensure_7zip():
             shutil.rmtree(tmp, ignore_errors=True)
+            self.refuse(arc.name, "This kind of archive needs 7-Zip, which isn't installed, so it was not opened.", "warn")
             return [], None
         err = self.pumped(run)
         if err:
-            self.log(f"Could not unpack {arc.name}: {err}", "err")
+            self.refuse(arc.name, sentence(f"the archive couldn't be unpacked ({err})"), "err", f"Could not unpack {arc.name}: {err}")
             shutil.rmtree(tmp, ignore_errors=True)
             return [], None
         files, _ = self.scan_folder(tmp, archives=False)
         if not files:
-            self.log(f"{arc.name}: no disc images found inside.", "warn")
+            self.refuse(arc.name, "There are no disc images inside this archive.", "warn", f"{arc.name}: no disc images found inside.")
             shutil.rmtree(tmp, ignore_errors=True)
             return [], None
         self.arc_dirs[tmp] = 0
@@ -7079,12 +7238,15 @@ class App:
         if self.running:
             return
         if not CHDMAN:
-            if not self.silent:
-                messagebox.showerror(APP_NAME, "chdman.exe was not found. Set it in Settings, Output page.")
+            self.notify("chdman was not found, so nothing can be converted. Set it in Settings, Output page.", error=True)
             return
         todo = [j for j in (only if only is not None else self.jobs) if not j.status.startswith("Done")]
         if not todo:
             self.status.config(text="Nothing to do - add files first.")
+            if not self.jobs:
+                self.notify("There is nothing to convert yet. Add files first: drag them onto this window, or click Add Files or Add Folder.")
+            else:
+                self.notify("Everything in the list is already done. Add more files, or clear the list to start fresh.")
             return
         if self.pbp_jobs(todo) and not self.offer_base_pbp():
             return
@@ -7093,6 +7255,7 @@ class App:
             self.refresh_job(j)
         self.save_settings()
         self.log_mark = self.logbox.index("end-1c")
+        self.run_jobs, self._busy_told = list(todo), False
         self.running, self.stop_flag = True, False
         self.set_state("run")
         self.start_btn.config(state="disabled")
@@ -9080,6 +9243,7 @@ class App:
         chds = [j for j in self.selected_jobs() if j.path.suffix.lower() == ".chd"]
         if not chds:
             self.status.config(text="Select one or more .chd files to verify.")
+            self.notify("Nothing to verify: click one or more .chd files in the list first (verifying works on CHD files only), then try again.")
             return
         for j in chds:
             j.set_target("verify")
@@ -9153,7 +9317,8 @@ class App:
         if err or not info:
             if manual:
                 self.status.config(text="Could not check for a CHD Manager update.")
-                self.log("CHD Manager update check failed: " + err, "warn")
+                self.notify("Could not check for a CHD Manager update.\n\nThe reason: " + (err or "no answer from GitHub") +
+                            "\n\nCheck your internet connection and try again later.", error=True)
                 self.set_footer("app", "couldn't check", revert_after=8000)
             return
         self.app_latest = info
@@ -9274,6 +9439,7 @@ class App:
     def update_clicked(self):
         if self.running:
             self.status.config(text="Wait for the current jobs to finish before updating chdman.")
+            self.busy_notice("updating chdman")
             return
         if self.update_available():
             self.confirm_install()
@@ -9284,7 +9450,8 @@ class App:
         if err or not info:
             if manual:
                 self.status.config(text="Could not check for updates.")
-                self.log("Update check failed: " + err, "warn")
+                self.notify("Could not check for a chdman update.\n\nThe reason: " + (err or "no answer from GitHub") +
+                            "\n\nCheck your internet connection and try again later.", error=True)
                 self.set_footer("chdman", "couldn't check", revert_after=8000)
             return
         self.latest = info
@@ -9424,6 +9591,17 @@ class App:
         if c:
             self.log(f"Previous version backed up to {c}", "info")
 
+    def report_run(self):
+        """After a run: every item that did not become what was asked gets named, with the reason, in one window."""
+        jobs = self.run_jobs
+        rows = [(j.path.name, plain_reason(j)) for j in jobs if not j.status.startswith(("Done", "Stopped"))]
+        if not rows:
+            return
+        n, total = len(rows), len(jobs)
+        self.report_problems(
+            f"{n} of {total} item{'s' if total != 1 else ''} {'was' if n == 1 else 'were'} not converted:", rows,
+            "Your original files were not changed or deleted for these. The log has the full details.")
+
     # ------------------------------------------------------------------ UI pump
     def pump(self):
         try:
@@ -9485,6 +9663,7 @@ class App:
                             winsound.MessageBeep()
                         except Exception:  # noqa: BLE001
                             pass
+                    self.report_run()
         except queue.Empty:
             pass
         try:
