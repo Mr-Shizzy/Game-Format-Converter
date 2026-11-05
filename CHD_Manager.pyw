@@ -541,20 +541,45 @@ def ver_tuple(s):
     return tuple(nums + [0] * (3 - len(nums)))
 
 
+def app_asset_kind():
+    """Which download of a release fits this install: the Windows exe zip, or the program source (Linux, macOS, Windows-from-source)."""
+    return "win64" if (FROZEN or os.name == "nt") else "source"
+
+
+def parse_app_release(data, kind):
+    """A GitHub 'latest release' answer -> dict(tag, name, url, size, sha, page, notes, kind). Only trusts github.com/<repo>/.
+    win64: the first 64-hex text in the notes is the zip's SHA-256 (the convention every released updater already reads).
+    source: the SHA-256 is on the line of the notes that names the source zip ('<hash>  CHD-Manager-x-source.zip').
+    A release without a source zip still parses (url is empty): the update can be announced, just not installed by itself."""
+    pat = r"CHD-Manager-.+-win64\.zip" if kind == "win64" else r"CHD-Manager-.+-source\.zip"
+    asset = next((a for a in data.get("assets", []) if re.fullmatch(pat, a["name"])), None)
+    body = data.get("body") or ""
+    if kind == "win64":
+        if not asset:
+            raise RuntimeError("The latest release has no Windows zip.")
+        m = re.search(r"\b([0-9a-fA-F]{64})\b", body)
+        sha = m.group(1) if m else ""
+    else:
+        sha = ""
+        if asset:
+            for line in body.splitlines():
+                if asset["name"] in line:
+                    m = re.search(r"\b([0-9a-fA-F]{64})\b", line)
+                    if m:
+                        sha = m.group(1)
+                        break
+    if asset and not asset["browser_download_url"].startswith(APP_URL_PREFIX):
+        raise RuntimeError("Unexpected download address: " + asset["browser_download_url"])
+    return {"tag": data["tag_name"], "name": asset["name"] if asset else "", "url": asset["browser_download_url"] if asset else "",
+            "size": asset["size"] if asset else 0, "sha": sha, "page": data.get("html_url", APP_URL_PREFIX + "releases"),
+            "notes": body.strip(), "kind": kind}
+
+
 def fetch_app_release():
-    """Latest CHD Manager release -> dict(tag, name, url, size, sha, page, notes). Only trusts github.com/<repo>/."""
+    """Latest CHD Manager release -> dict(tag, name, url, size, sha, page, notes, kind)."""
     with http_get(APP_RELEASE_API) as r:
         data = json.loads(r.read().decode("utf-8"))
-    asset = next((a for a in data.get("assets", []) if re.fullmatch(r"CHD-Manager-.+-win64\.zip", a["name"])), None)
-    if not asset:
-        raise RuntimeError("The latest release has no Windows zip.")
-    if not asset["browser_download_url"].startswith(APP_URL_PREFIX):
-        raise RuntimeError("Unexpected download address: " + asset["browser_download_url"])
-    body = data.get("body") or ""
-    m = re.search(r"\b([0-9a-fA-F]{64})\b", body)
-    return {"tag": data["tag_name"], "name": asset["name"], "url": asset["browser_download_url"],
-            "size": asset["size"], "sha": m.group(1) if m else "", "page": data.get("html_url", APP_URL_PREFIX + "releases"),
-            "notes": body.strip()}
+    return parse_app_release(data, app_asset_kind())
 
 
 def stage_app_update(info, dest_dir, progress=None):
@@ -596,6 +621,119 @@ def stage_app_update(info, dest_dir, progress=None):
         return new
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---- updating the program from source (Linux, macOS): replace the program files, keep the old ones, restart
+SOURCE_FILES = ("CHD_Manager.pyw", "chd-manager.sh", "LICENSE", "THIRD_PARTY_NOTICES.txt", "README.md")   # the only names an update may write
+SOURCE_BACKUP = "previous-version"
+SOURCE_MAX = 20 << 20
+
+
+def can_self_update_source():
+    """True for a Linux/macOS copy that runs from its own folder (not the packaged exe, not Windows)."""
+    return (not FROZEN) and os.name != "nt" and (HERE / "CHD_Manager.pyw").is_file()
+
+
+def fetch_source_update(info, progress=None, opener=None):
+    """Download the source zip, check its size and SHA-256, and return {file name: bytes} for the known file names only.
+    Refuses an address outside github.com/<repo>/, a release without a published checksum, a hash mismatch, a duplicate
+    name and anything bigger than expected. Nothing is written to the program folder here."""
+    import zipfile
+    opener = opener or http_get
+    if not info.get("url", "").startswith(APP_URL_PREFIX):
+        raise RuntimeError("Unexpected download address.")
+    if not info.get("sha"):
+        raise RuntimeError("This release has no published checksum, so it can't be verified. Download it by hand.")
+    tmp = Path(tempfile.mkdtemp(prefix="chdm_src_update_"))
+    try:
+        zpath, h, got = tmp / "update.zip", hashlib.sha256(), 0
+        cap = min(SOURCE_MAX, max(int(info.get("size") or 0), 1) + (1 << 20))
+        with opener(info["url"], 60) as r, open(zpath, "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > cap:
+                    raise RuntimeError("The download is bigger than the release says, so it was discarded.")
+                f.write(chunk)
+                h.update(chunk)
+                if progress:
+                    progress(100 * got / max(info.get("size") or 1, 1), f"Downloading {info['name']}: {fmt_size(got)} / {fmt_size(info.get('size') or 0)}")
+        if h.hexdigest().lower() != info["sha"].lower():
+            raise RuntimeError("Checksum mismatch - the download was discarded.")
+        with zipfile.ZipFile(zpath) as z:
+            chosen = {}
+            for zi in z.infolist():
+                base = Path(zi.filename).name
+                if zi.is_dir() or base not in SOURCE_FILES:
+                    continue                                    # anything else in the zip is ignored, never written
+                if base in chosen:
+                    raise RuntimeError(f"The zip holds {base} twice, so it was not trusted.")
+                if zi.file_size > SOURCE_MAX:
+                    raise RuntimeError(f"{base} in the zip is unexpectedly large.")
+                chosen[base] = zi
+            if "CHD_Manager.pyw" not in chosen:
+                raise RuntimeError("The zip does not contain CHD_Manager.pyw.")
+            return {n: z.read(zi) for n, zi in chosen.items()}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_source_files(files, want_version):
+    """The new program must be Python that compiles, say it is the version the release claims, and its launcher must be a script."""
+    try:
+        src = files["CHD_Manager.pyw"].decode("utf-8")
+        compile(src, "CHD_Manager.pyw", "exec")
+    except (UnicodeDecodeError, SyntaxError, ValueError) as e:
+        raise RuntimeError(f"The downloaded program isn't valid ({type(e).__name__}).") from None
+    m = re.search(r'^APP_VER\s*=\s*"([^"]+)"', src, re.M)
+    if not m or ver_tuple(m.group(1)) != ver_tuple(want_version):
+        raise RuntimeError(f"The downloaded program says it is version {m.group(1) if m else '?'}, not {want_version}, so it was not installed.")
+    sh = files.get("chd-manager.sh")
+    if sh is not None and not sh.startswith(b"#!"):
+        raise RuntimeError("The downloaded launcher script isn't a script.")
+
+
+def install_source_update(files, dest_dir):
+    """Put the new files into dest_dir. The old copies are kept in dest_dir/previous-version, and if anything goes wrong half way
+    every file is put back as it was. Settings, keys, chdman and anything else in the folder are not touched."""
+    dest = Path(dest_dir)
+    if not os.access(dest, os.W_OK):
+        raise RuntimeError("CHD Manager's folder can't be written to (it may belong to another user or a package), so it can't update itself.")
+    backup = dest / SOURCE_BACKUP
+    order = [n for n in files if n != "CHD_Manager.pyw"] + ["CHD_Manager.pyw"]     # the program itself goes last
+    staged, done = {}, []
+    try:
+        backup.mkdir(exist_ok=True)
+        for n in order:
+            old = dest / n
+            if old.is_file():
+                shutil.copy2(old, backup / n)
+        for n in order:
+            old, tmp = dest / n, dest / f".{n}.chdm_new"
+            tmp.write_bytes(files[n])
+            mode = (old.stat().st_mode & 0o777) if old.is_file() else 0o644
+            os.chmod(tmp, (mode | 0o755) if n.endswith(".sh") else mode)
+            staged[n] = tmp
+        for n in order:
+            os.replace(staged[n], dest / n)
+            done.append(n)
+    except Exception:
+        for n in done:
+            try:
+                if (backup / n).is_file():
+                    shutil.copy2(backup / n, dest / n)
+                else:
+                    (dest / n).unlink()                       # a file that did not exist before
+            except OSError:
+                pass
+        for tmp in staged.values():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def spawn_swap(script):
@@ -9419,27 +9557,36 @@ class App:
         if self.running:
             self.notify("Wait for the current jobs to finish, then click the update badge again.")
             return
+        mode = "exe" if FROZEN else "page"
         if FROZEN:
             msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
                    f"Update now? It downloads {info['name']} ({fmt_size(info['size'])}) from github.com/{APP_REPO}, "
                    "checks its SHA-256, test-runs it, and restarts into the new version. "
                    "Your settings and chdman stay as they are.")
-        else:
+        elif can_self_update_source() and info.get("kind") == "source" and info.get("url") and os.access(HERE, os.W_OK):
+            mode = "source"
             msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
-                   "You're running the script version, so it can't replace itself. "
-                   "'Update now' opens the download page.")
+                   f"Update now? It downloads {info['name']} ({fmt_size(info['size'])}) from github.com/{APP_REPO}, "
+                   "checks its SHA-256, test-runs the new version, then replaces the program files in this folder and restarts. "
+                   f"The old files are kept in a '{SOURCE_BACKUP}' folder. Your settings, keys and chdman are not touched.")
+        else:
+            why = ("This release has no download for this kind of install." if can_self_update_source() and not info.get("url")
+                   else "This copy's folder can't be written to." if can_self_update_source() and not os.access(HERE, os.W_OK)
+                   else "You're running the script version, so it can't replace itself.")
+            msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
+                   f"{why} 'Update now' opens the download page.")
         choice = self.ask_update_choice(msg)
         if choice == "skip":
             self.v["skip_version"].set(info["tag"])
             self.log(f"Skipping {new_v} at startup. The update badge and Settings, About page still offer it.", "info")
         elif choice == "now":
-            if not FROZEN:
+            if mode == "page":
                 if not self.silent:
                     webbrowser.open(info["page"])
                 return
             self.app_upd_btn.config(state="disabled")
             self.app_btn.config(state="disabled")
-            threading.Thread(target=self.app_update_worker, args=(info,), daemon=True).start()
+            threading.Thread(target=self.app_update_worker if mode == "exe" else self.source_update_worker, args=(info,), daemon=True).start()
         # "later": nothing recorded, so it asks again next launch
 
     def app_update_worker(self, info):
@@ -9465,6 +9612,49 @@ class App:
         finally:
             if report_dir:
                 shutil.rmtree(report_dir, ignore_errors=True)
+
+    def source_update_worker(self, info):
+        """Linux / macOS: download, verify, test-run the new version from a scratch folder, install it, ask for a restart."""
+        stage = None
+        try:
+            files = fetch_source_update(info, lambda pct, txt: self.post("upd_progress", pct, txt))
+            check_source_files(files, info["tag"])
+            self.post("upd_progress", 100, "Testing the new version…")
+            stage = Path(tempfile.mkdtemp(prefix="chdm_src_test_"))
+            (stage / "CHD_Manager.pyw").write_bytes(files["CHD_Manager.pyw"])
+            report = stage / "report.json"
+            run_capture([sys.executable, str(stage / "CHD_Manager.pyw"), "--smoke", str(report)], timeout=180)
+            r = json.loads(report.read_text("utf-8")) if report.exists() else {}
+            bad = (not r or r.get("error") or ver_tuple(r.get("app_version", "")) != ver_tuple(info["tag"])
+                   or (r.get("chdman") and r.get("status") != "Done"))          # without chdman the conversion part of the test can't run
+            if bad:
+                raise RuntimeError("The downloaded version failed its self-test, so it was not installed. "
+                                   + (r.get("error", "") or f"(status: {r.get('status')}, version: {r.get('app_version')})").strip()[-400:])
+            self.post("upd_progress", 100, "Installing…")
+            install_source_update(files, HERE)
+            self.post("app_upd_restart")
+        except Exception as e:  # noqa: BLE001
+            self.post("app_upd_done", False, str(e))
+        finally:
+            if stage:
+                shutil.rmtree(stage, ignore_errors=True)
+
+    def on_app_update_restart(self):
+        """The new files are in place: start the program again from them (the same process is replaced, so there is one window)."""
+        self.status.config(text="Restarting into the new version…")
+        self.log("Updated. Restarting into the new version…", "ok")
+        self.restart_requested = True
+        if self.silent:
+            return
+        self.save_settings()
+        self.drop_all_arcs()
+        try:
+            os.execv(sys.executable, [sys.executable, str(HERE / "CHD_Manager.pyw")])
+        except OSError as e:
+            self.app_upd_btn.config(state="normal")
+            self.app_btn.config(state="normal")
+            messagebox.showinfo(APP_NAME, f"The update was installed, but the program couldn't restart itself ({e}).\n\n"
+                                          "Close CHD Manager and start it again to use the new version.")
 
     def on_app_update_done(self, ok, msg):
         self.app_upd_btn.config(state="normal")
@@ -9705,6 +9895,8 @@ class App:
                     self.on_app_update_info(ev[1], ev[2], ev[3])
                 elif kind == "app_upd_ready":
                     self.on_app_update_ready(ev[1])
+                elif kind == "app_upd_restart":
+                    self.on_app_update_restart()
                 elif kind == "app_upd_done":
                     self.on_app_update_done(ev[1], ev[2])
                 elif kind == "finish":
