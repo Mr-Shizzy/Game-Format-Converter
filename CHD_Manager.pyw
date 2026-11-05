@@ -4528,8 +4528,9 @@ class Job:
             self.size, self.src_files = info["size"], [p]
             self.auto_type = "DVD"
             self.reason = "PS3 update package" if info["patch"] else "PS3 game package"
-            if not RPCS3[0]:
-                self.warn = ("it needs your own RPCS3 to be unpacked, and none is set up yet (Settings, Formats, PlayStation 3: show it where rpcs3.exe is)")
+            if not RPCS3[0] and not PKG_KEY[0]:
+                self.warn = ("it needs your own RPCS3 or your own package key to be unpacked, and neither is set up yet "
+                             "(Settings, Formats, PlayStation 3: show it where rpcs3.exe is, or give it your key)")
             return
         if p.is_dir():
             info = ps3_folder_info(p)
@@ -5654,11 +5655,13 @@ def pkg_info(path):
     if len(d) < 0xC0 or d[:4] != b"\x7fPKG":
         raise ValueError("this isn't a PlayStation package (it doesn't start like one)")
     typ, plat, moff, mcnt, _msz, files, psz = struct.unpack(">HHIIIIQ", d[4:0x20])
+    data_off, data_size = struct.unpack(">QQ", d[0x20:0x30])
     if plat != 1:
         raise ValueError("this is a package for a different PlayStation (a PSP or Vita one); only PlayStation 3 packages can be unpacked")
     if psz != size:
         raise ValueError("this package is damaged or cut short (the file isn't the size its header says); download it again")
-    info = {"path": path, "size": size, "files": files, "patch": False, "version": 0, "content_type": 0,
+    info = {"path": path, "size": size, "files": files, "patch": False, "version": 0, "content_type": 0, "type": typ,
+            "data_offset": data_off, "data_size": data_size, "iv": bytes(d[0x70:0x80]),
             "content_id": d[0x30:0x54].split(b"\0")[0].decode("ascii", "replace")}
     off = moff
     for _ in range(min(mcnt, 32)):
@@ -5679,6 +5682,144 @@ def pkg_info(path):
         what = PKG_OTHER.get(info["content_type"], f"a kind of package (type {info['content_type']})")
         raise ValueError(f"this package holds {what}, not a PlayStation 3 game or its update, so there is no game folder to unpack")
     return info
+
+
+PKG_KEY = [None]                               # the user's own package key (16 bytes), only ever from what they pasted or chose
+
+
+class PkgKeyError(UnpackError):
+    """The key given doesn't open this package."""
+
+
+def parse_hex_key(data):
+    """A key given as 32 hexadecimal characters (spaces, colons, 0x allowed) or as a file of exactly 16 bytes -> 16 bytes, or None."""
+    if isinstance(data, (bytes, bytearray)) and len(data) == 16:
+        return bytes(data)
+    text = data.decode("ascii", "ignore") if isinstance(data, (bytes, bytearray)) else str(data)
+    text = re.sub(r"0x|[\s:\-]", "", text.strip(), flags=re.I)
+    return bytes.fromhex(text) if re.fullmatch(r"[0-9a-fA-F]{32}", text) else None
+
+
+def aes_ecb(key):
+    """-> a function that AES-128-ECB encrypts data (a multiple of 16 bytes, no padding), made with what this computer already has
+    (the 'cryptography' package if installed, Windows' own bcrypt, or the system's OpenSSL). Nothing is bundled."""
+    import ctypes
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        return Cipher(algorithms.AES(key), modes.ECB()).encryptor().update
+    except Exception:  # noqa: BLE001
+        pass
+    if os.name == "nt":
+        bc = ctypes.WinDLL("bcrypt")
+        alg, hk = ctypes.c_void_p(), ctypes.c_void_p()
+        mode = "ChainingModeECB"
+        if bc.BCryptOpenAlgorithmProvider(ctypes.byref(alg), "AES", None, 0) or \
+                bc.BCryptSetProperty(alg, "ChainingMode", mode, (len(mode) + 1) * 2, 0) or \
+                bc.BCryptGenerateSymmetricKey(alg, ctypes.byref(hk), None, 0, bytes(key), len(key), 0):
+            raise UnpackError("Windows' own encryption code (bcrypt) didn't start, so the package can't be opened here")
+
+        def enc_nt(data):
+            out, got = ctypes.create_string_buffer(len(data)), ctypes.c_ulong(0)
+            if bc.BCryptEncrypt(hk, bytes(data), len(data), None, None, 0, out, len(data), ctypes.byref(got), 0):
+                raise UnpackError("Windows' own encryption code (bcrypt) failed")
+            return out.raw[:got.value]
+        return enc_nt
+    import ctypes.util
+    name = ctypes.util.find_library("crypto")
+    if not name:
+        raise UnpackError("this computer has no AES library the program can use (on Linux install OpenSSL, or Python's 'cryptography' package)")
+    lib = ctypes.CDLL(name)
+    lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
+    lib.EVP_aes_128_ecb.restype = ctypes.c_void_p
+    ctx = ctypes.c_void_p(lib.EVP_CIPHER_CTX_new())
+    if not lib.EVP_EncryptInit_ex(ctx, ctypes.c_void_p(lib.EVP_aes_128_ecb()), None, bytes(key), None):
+        raise UnpackError("the system's OpenSSL didn't start, so the package can't be opened here")
+    lib.EVP_CIPHER_CTX_set_padding(ctx, 0)
+
+    def enc_ssl(data):
+        out, n = ctypes.create_string_buffer(len(data) + 16), ctypes.c_int(0)
+        if not lib.EVP_EncryptUpdate(ctx, out, ctypes.byref(n), bytes(data), len(data)):
+            raise UnpackError("the system's OpenSSL failed")
+        return out.raw[:n.value]
+    return enc_ssl
+
+
+def ctr_keystream(enc, iv, start, length):
+    """The bytes of an AES-CTR keystream (counter = iv + block number, 128 bits, big endian) for stream positions start .. start+length."""
+    from array import array
+    first, skip = divmod(start, 16)
+    n = (skip + length + 15) // 16
+    c0 = (int.from_bytes(iv, "big") + first) % (1 << 128)
+    hi0, lo0 = c0 >> 64, c0 & ((1 << 64) - 1)
+    buf = bytearray(16 * n)
+    if lo0 + n <= (1 << 64):                              # the usual case: only the low half counts
+        hb = hi0.to_bytes(8, "big")
+        for k in range(8):
+            buf[k::16] = hb[k:k + 1] * n
+        lo = array("Q", range(lo0, lo0 + n))
+        if sys.byteorder == "little":
+            lo.byteswap()
+        lb = lo.tobytes()
+        for k in range(8):
+            buf[8 + k::16] = lb[k::8]
+    else:                                                 # the counter carries into the high half
+        for i in range(n):
+            buf[16 * i:16 * i + 16] = ((c0 + i) % (1 << 128)).to_bytes(16, "big")
+    return enc(bytes(buf))[skip:skip + length]
+
+
+def _xor(a, b):
+    return (int.from_bytes(a, "little") ^ int.from_bytes(b, "little")).to_bytes(len(a), "little")
+
+
+def pkg_source(info, key):
+    """(entries, read, close) for the files of a retail PS3 package, opened with the user's own key. entries are
+    [(path parts, is_file, (offset, overwrite flag), size)]; read(src, size) yields the decrypted bytes."""
+    if info["type"] != 0x8000:
+        raise UnpackError("this is a debug package, not a retail one; only retail packages can be unpacked with a key")
+    enc = aes_ecb(key)
+    f = open(info["path"], "rb")
+    dsize, base, iv = info["data_size"], info["data_offset"], info["iv"]
+
+    def stream(pos, n):
+        f.seek(base + pos)
+        data = f.read(n)
+        if len(data) != n:
+            raise UnpackError("this package is cut short")
+        return _xor(data, ctr_keystream(enc, iv, pos, n)) if n else b""
+
+    try:
+        count = info["files"]
+        if not 0 < count < 1_000_000 or count * 32 > dsize:
+            raise PkgKeyError("this package's file table is damaged")
+        table = stream(0, count * 32)
+        ents = []
+        for i in range(count):
+            name_off, name_size, file_off, file_size, etype, _pad = struct.unpack(">IIQQII", table[32 * i:32 * i + 32])
+            if name_size > 4096 or name_off + name_size > dsize or file_off + file_size > dsize:
+                raise PkgKeyError("that key doesn't open this package (its file list came out as nonsense)")
+            raw = stream(name_off, name_size).rstrip(b"\0")
+            try:
+                name = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise PkgKeyError("that key doesn't open this package (its file names came out as nonsense)") from None
+            if not name or any(ord(c) < 32 for c in name):
+                raise PkgKeyError("that key doesn't open this package (its file names came out as nonsense)")
+            parts = tuple(x.encode("utf-8") for x in name.replace("\\", "/").split("/") if x)
+            is_file = (etype & 0xFF) != 4
+            ents.append((parts, is_file, (file_off, bool(etype & 0x80000000)), file_size if is_file else 0))
+    except BaseException:
+        f.close()
+        raise
+
+    def read(src, size, chunk=1 << 20):
+        pos = src[0]
+        while size > 0:
+            n = min(chunk, size)
+            yield stream(pos, n)
+            pos += n
+            size -= n
+    return ents, read, f.close
 
 
 def find_rpcs3(configured=""):
@@ -6499,7 +6640,7 @@ DEFAULTS = {
     "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
-    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
+    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "pkg_key": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
 }
 
 
@@ -6803,7 +6944,7 @@ class App:
         for key in ("compression", "custom_comp", "hunk", "threads", "verify_after", "low_priority", "delete_src", "delete_forever",
                     "exists", "out_mode", "out_dir", "auto_suggest"):
             self.v[key].trace_add("write", lambda *a: self.refresh_summary())
-        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3"):
+        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3", "pkg_key"):
             self.v[key].trace_add("write", lambda *a: self.refresh_wii())
         self.style_widgets()
         self.refresh_summary()
@@ -6945,8 +7086,18 @@ class App:
         pr.grid(row=3, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(pr, textvariable=v["rpcs3"], width=44).grid(row=0, column=0)
         ttk.Button(pr, text="Browse…", command=self.pick_rpcs3).grid(row=0, column=1, padx=4)
+        ttk.Label(g4, text="No RPCS3? Then give your own package key instead (32 letters and numbers, or a file that holds it).\n"
+                           "CHD Manager contains no keys and never downloads them. RPCS3 is used first when both are set.").grid(
+            row=4, column=0, sticky="w", pady=(10, 0))
+        kf = ttk.Frame(g4)
+        kf.grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.pkg_key_entry = tk.StringVar()
+        ttk.Entry(kf, textvariable=self.pkg_key_entry, width=44, show="•").grid(row=0, column=0)
+        ttk.Button(kf, text="Use this key", command=self.take_pkg_key).grid(row=0, column=1, padx=4)
+        ttk.Button(kf, text="Choose key file…", command=self.pick_pkg_key_file).grid(row=0, column=2)
+        ttk.Button(kf, text="Forget the key", command=lambda: self.v["pkg_key"].set("")).grid(row=0, column=3, padx=4)
         self.rpcs3_status = ttk.Label(g4, text="", style="Muted.TLabel", wraplength=560, justify="left")
-        self.rpcs3_status.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self.rpcs3_status.grid(row=6, column=0, sticky="w", pady=(4, 0))
 
         # --- Output
         f = tab("Output")
@@ -8289,6 +8440,26 @@ class App:
         if d:
             self.v["art_dir"].set(d)
 
+    def take_pkg_key(self, data=None):
+        key = parse_hex_key(self.pkg_key_entry.get() if data is None else data)
+        if not key:
+            messagebox.showerror(APP_NAME, "That isn't a key. A package key is 32 letters and numbers (0-9 and a-f).", parent=self.settings_win)
+            return
+        self.v["pkg_key"].set(key.hex())
+        self.pkg_key_entry.set("")
+        self.save_settings()
+
+    def pick_pkg_key_file(self):
+        p = filedialog.askopenfilename(parent=self.settings_win, title="Choose the file that holds your package key",
+                                       filetypes=[("Key files", "*.txt *.key *.bin *.hex"), ("All files", "*.*")])
+        if p:
+            try:
+                if Path(p).stat().st_size > 4096:
+                    raise OSError("that file is too big to be a key file")
+                self.take_pkg_key(Path(p).read_bytes())
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Couldn't read that file: {e}", parent=self.settings_win)
+
     def pick_rpcs3(self):
         p = filedialog.askopenfilename(parent=self.settings_win, title="Find RPCS3: choose rpcs3.exe",
                                        filetypes=[("RPCS3", "rpcs3.exe"), ("All programs", "*.exe")])
@@ -9446,8 +9617,10 @@ class App:
         """PS3 packages (a game, then its updates) -> the game's folder. The packages are installed by the user's own RPCS3 into a throwaway
         copy of its program files, and the finished game folder is moved out of that copy. The real RPCS3 and its library are not touched."""
         exe = find_rpcs3(o.get("rpcs3", ""))
-        if not exe:
-            job.status, job.result = "Failed (setup needed)", "this needs your own RPCS3: Settings, Formats, PlayStation 3, and show it where rpcs3.exe is"
+        key = parse_hex_key(o.get("pkg_key", ""))
+        if not exe and not key:
+            job.status, job.result = "Failed (setup needed)", ("this needs your own RPCS3 or your own package key: Settings, Formats, PlayStation 3, "
+                                                               "and show it where rpcs3.exe is, or give it your key")
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         if not any(not i["patch"] for i in job.pkgs):
@@ -9457,6 +9630,8 @@ class App:
         out, skip = self.folder_target(job, o)
         if skip:
             return
+        if not exe:
+            return self.pkg_own_unpack(job, o, out, key)
         work = out.parent / f".{out.name[:40]}.chdm_rpcs3"
         shutil.rmtree(work, ignore_errors=True)
         n = len(job.pkgs)
@@ -9538,6 +9713,58 @@ class App:
             self.post("log", "The package sources were kept (a package has no checksum to prove the copy against). No licence (RAP) is needed to unpack; "
                              "keep yours for playing.", "info")
 
+    def pkg_own_unpack(self, job, o, out, key):
+        """The packages (game, then its updates) -> the game folder, opened by this program with the user's own key."""
+        work = out.parent / f".{out.name[:40]}.chdm_pkg"
+        shutil.rmtree(work, ignore_errors=True)
+        n = len(job.pkgs)
+        self.post("log", f"\n{job.path.name}  [PS3 package{'s' if n != 1 else ''} → game folder, opened with your own key]", "info")
+        base = self.cso_progress(job, "Unpacking")
+        ok = False
+        try:
+            work.mkdir(parents=True)
+            for k, info in enumerate(job.pkgs):
+                self.post("log", f"Package {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else ""), "info")
+                ents, read, close = pkg_source(info, key)
+                try:
+                    if k:          # a file that is already there is only replaced when the update says so (as the console does)
+                        keep = []
+                        for e in ents:
+                            tgt = work.joinpath(*[x.decode("utf-8", "replace") for x in e[0]])
+                            if e[1] and tgt.exists() and not e[2][1]:
+                                continue
+                            keep.append(e)
+                        ents = keep
+                    self.unpack_entries(job, ents, read, work, lambda x, k=k: base((k + x) / n), "utf-8", lambda r: ps3_folder_source(r, True),
+                                        verify=self.verify_wanted() and k == 0)
+                finally:
+                    close()
+            os.replace(work, out)
+            ok = True
+        except PkgKeyError as e:
+            job.status, job.result = "Failed (wrong key)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            if not ok:
+                shutil.rmtree(out, ignore_errors=True)
+        if ok:
+            job.note = (f"{n} packages merged" if n > 1 else "")
+            self.folder_finish(job, out)
+            if n > 1 and self.verify_wanted():
+                self.post("log", "The game package was read back and checked; the updates written over it were not (they change files the check "
+                                 "would compare).", "info")
+            self.post("log", "The package sources were kept. No licence (RAP) is needed to unpack; keep yours for playing.", "info")
+
     def do_join_ps3(self, job, o):
         """The pieces of a split PS3 disc image -> one ISO."""
         out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
@@ -9568,11 +9795,11 @@ class App:
         if o["delete_src"] and self.verify_wanted():
             self.remove_sources(job, o)
 
-    def unpack_entries(self, job, ents, read, dest, prog, enc, readback):
+    def unpack_entries(self, job, ents, read, dest, prog, enc, readback, verify=None):
         """Write the files of a disc image or archive into the folder dest. A name this computer can't use is changed (and listed in the
         log and in the finished row) instead of stopping the whole disc. With 'verify' on, what was written is read back against the
         source: readback(folder) -> (entries, read, close) of what is on disk."""
-        verify = self.verify_wanted()
+        verify = self.verify_wanted() if verify is None else verify
         stop = lambda: self.stop_flag  # noqa: E731
         root = Path(dest).resolve()
         fixed, renamed = fix_entry_names(ents, enc)
@@ -9848,9 +10075,11 @@ class App:
     # ---- Wii keys and Dolphin
     def refresh_wii(self):
         RPCS3[0] = find_rpcs3(self.v["rpcs3"].get().strip())
+        PKG_KEY[0] = parse_hex_key(self.v["pkg_key"].get())
         if hasattr(self, "rpcs3_status"):
-            self.rpcs3_status.config(text=f"✓ Found: {RPCS3[0]}" if RPCS3[0] else
-                                     "Not set yet. Without it, .pkg packages can be added but not unpacked.")
+            self.rpcs3_status.config(text=(f"✓ RPCS3 found: {RPCS3[0]}" if RPCS3[0] else "RPCS3: not set yet.") + "   " +
+                                     ("✓ A package key is set." if PKG_KEY[0] else "Package key: not set.") +
+                                     ("" if RPCS3[0] or PKG_KEY[0] else "  Without either, .pkg packages can be added but not unpacked."))
         load_wii_keys(self.v["wii_common_key"].get(), self.v["wii_korean_key"].get())
         WII_TOOL[0] = find_dolphintool(self.v["dolphintool"].get().strip())
         WII_SCRUB[0] = bool(self.v["wbfs_scrub"].get())
@@ -11267,6 +11496,7 @@ def cli_main(argv):
     ap.add_argument("--level", type=int, choices=range(10), metavar="0-9", help="PBP compression (default 6)")
     ap.add_argument("--wii-key", metavar="HEX", help="your Wii common key (32 hex characters); or put it in the keys folder")
     ap.add_argument("--rpcs3", metavar="EXE", help="your rpcs3.exe, used to unpack PS3 .pkg packages")
+    ap.add_argument("--pkg-key", metavar="HEX", help="your own PS3 package key (32 hex characters), used to unpack .pkg packages when there is no RPCS3")
     ap.add_argument("--dolphintool", metavar="EXE", help="your DolphinTool.exe, used for Wii RVZ/WIA when there is no key")
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
@@ -11312,7 +11542,7 @@ def cli_main(argv):
     code = 1
     try:
         for k, d in DEFAULTS.items():                    # only the machine's own paths come from the saved settings
-            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "rpcs3", "wii_common_key", "wii_korean_key"):
+            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "rpcs3", "pkg_key", "wii_common_key", "wii_korean_key"):
                 app.v[k].set(d)
         v = app.v
         if a.output:
@@ -11338,6 +11568,8 @@ def cli_main(argv):
             v["dolphintool"].set(a.dolphintool)
         if a.rpcs3:
             v["rpcs3"].set(a.rpcs3)
+        if a.pkg_key:
+            v["pkg_key"].set(a.pkg_key)
         if a.rvz_method:
             v["rvz_method"].set(a.rvz_method)
         if a.rvz_level:
