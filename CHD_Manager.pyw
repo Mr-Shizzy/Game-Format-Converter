@@ -4218,7 +4218,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4261,7 +4261,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
 SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
 
@@ -4349,6 +4349,8 @@ class Job:
                 return sum(chd_logical_size(c) or c.stat().st_size * 3 for c in self.m3u_chds)
             if self.container == "cso":
                 return read_cso_header(p)[0]
+            if self.container == "psnfolder":
+                return self.zar_raw
             if self.container in ("zar", "xfolder", "ps3folder"):
                 return self.zar_raw + 4 * XISO_MODULUS
             if self.container == "disc":
@@ -4386,6 +4388,8 @@ class Job:
             return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
         if self.container == "ps3folder":           # a PS3 game folder: a disc image of it (RPCS3 loads those), or a CHD of one
             return [(k, target_label(k)) for k in ("iso", "chd")]
+        if self.container == "psnfolder":           # a PSN game folder: a package of it that RPCS3 can install
+            return [("pkg", target_label("pkg"))]
         if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
             return [("folder", target_label("folder"))]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
@@ -4527,10 +4531,20 @@ class Job:
             self.pkgs = [info]
             self.size, self.src_files = info["size"], [p]
             self.auto_type = "DVD"
-            self.reason = "PS3 update package" if info["patch"] else "PS3 game package"
+            self.reason = "PS3 update package" if info["patch"] else "PS3 DLC package" if info["dlc"] else "PS3 game package"
             if not RPCS3[0] and not PKG_KEY[0]:
                 self.warn = ("it needs your own RPCS3 or your own package key to be unpacked, and neither is set up yet "
                              "(Settings, Formats, PlayStation 3: show it where rpcs3.exe is, or give it your key)")
+            return
+        if p.is_dir() and psn_folder_info(p) is not None:     # a PSN game as RPCS3 keeps it (PARAM.SFO and USRDIR): can become a package for RPCS3
+            ents = ps3_folder_source(p, True)[0]
+            self.container, self.platform, self.types = "psnfolder", "PS3", ["MODE1"]
+            self.ps3_info = dict(psn_folder_info(p), encrypted=False)
+            self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
+            self.size, self.src_files = self.zar_raw, [p]
+            self.auto_type, self.reason = "DVD", "PS3 game folder from the PlayStation Store"
+            if not PKG_KEY[0]:
+                self.warn = ("making a package from it needs your own package key, and none is set up yet (Settings, Formats, PlayStation 3: give it your key)")
             return
         if p.is_dir():
             info = ps3_folder_info(p)
@@ -4694,12 +4708,13 @@ class Job:
     def add_pkg(self, other):
         """Another package of the same game (a base and its updates are installed in that order, as on a console) joins this item."""
         self.pkgs += other.pkgs
-        self.pkgs.sort(key=lambda i: (i["patch"], i["version"], i["path"].name.lower()))
+        self.pkgs.sort(key=lambda i: (2 if i["dlc"] else 1 if i["patch"] else 0, i["version"], i["path"].name.lower()))
         self.src_files = [i["path"] for i in self.pkgs]
         self.path = self.home = self.src_files[0]
         self.size = sum(i["size"] for i in self.pkgs)
-        kinds = sum(1 for i in self.pkgs if i["patch"])
-        self.reason = "PS3 game package" + (f" with {kinds} update{'s' if kinds != 1 else ''}" if kinds else "")
+        ups, dlcs = sum(1 for i in self.pkgs if i["patch"]), sum(1 for i in self.pkgs if i["dlc"])
+        extra = ([f"{ups} update{'s' if ups != 1 else ''}"] if ups else []) + ([f"{dlcs} DLC"] if dlcs else [])
+        self.reason = "PS3 game package" + (" with " + " and ".join(extra) if extra else "")
         self._raw = None
 
     def row(self):
@@ -5244,6 +5259,25 @@ def ps3_folder_info(path):
         return {"id": "", "title": "", "region": ""}
 
 
+def psn_folder_info(path):
+    """A game folder as RPCS3 installs a PSN download (PARAM.SFO and USRDIR at its top, no PS3_GAME) -> its game info, else None."""
+    p = Path(path)
+    if p.name.upper() == "PS3_GAME" or _child(p, "PS3_GAME") is not None:
+        return None
+    s = _child(p, "PARAM.SFO")
+    u = _child(p, "USRDIR")
+    if s is None or not s.is_file() or u is None or not u.is_dir():
+        return None
+    try:
+        sfo = read_sfo(s.read_bytes()[:1 << 20])
+    except OSError:
+        return None
+    info = ps3_sfo_info(sfo)
+    if str(sfo.get("CATEGORY", "")) == "DG" or not re.fullmatch(r"[A-Z]{4}[0-9]{5}", info["id"]):
+        return None
+    return info
+
+
 class _P3Parts:
     """One disc image that may be kept in several files (name.iso.0, name.iso.1, ...), read as if it were one."""
     def __init__(self, paths):
@@ -5677,6 +5711,7 @@ def pkg_info(path):
             info["version"] = struct.unpack(">H", body[6:8])[0]
         off += 8 + ln
     cid = info["content_id"]
+    info["dlc"] = info["content_type"] == 4                    # extra content for a game (installs into the game's own folder)
     info["title_id"] = cid[7:16] if len(cid) >= 16 and cid[6] == "-" else cid
     if info["content_type"] not in PKG_CONTENT:
         what = PKG_OTHER.get(info["content_type"], f"a kind of package (type {info['content_type']})")
@@ -5820,6 +5855,87 @@ def pkg_source(info, key):
             pos += n
             size -= n
     return ents, read, f.close
+
+
+PKG_TRAILER = 96                               # the bytes real packages end with (a checksum and a signature field; only the checksum is filled here)
+PKG_REGION = {"U": "UP", "E": "EP", "J": "JP", "H": "HP", "A": "HP", "K": "KP"}
+
+
+def pkg_content_id(title_id, title=""):
+    """A content ID in the usual shape (UP9000-NPUB31582_00-LABEL16CHARACTERS) for the game with this ID."""
+    label = re.sub(r"[^A-Z0-9]", "", title.upper())[:16].ljust(16, "0")
+    return f"{PKG_REGION.get(title_id[2:3], 'UP')}9000-{title_id}_00-{label}"
+
+
+def build_pkg(ents, read, dest, key, content_id, prog, stopped, content_type=5):
+    """Entries [(path parts as bytes, is_file, src, size)] (a PSN-style game folder: PARAM.SFO and USRDIR at the top) -> a retail-layout
+    package at dest, sealed with the user's own key. For RPCS3: a console would also want Sony's signature, which nobody can make."""
+    enc = aes_ecb(key)
+    iv = os.urandom(16)
+    n = len(ents)
+    names = [b"/".join(parts) for parts, _f, _s, _z in ents]
+    table_len = 32 * n
+    name_offs, pos = [], table_len
+    for nm in names:
+        name_offs.append(pos)
+        pos += len(nm) + (-len(nm)) % 16
+    pos += (-pos) % 16
+    file_offs = []
+    for _parts, is_file, _src, size in ents:
+        file_offs.append(pos)
+        if is_file:
+            pos += size + (-size) % 16
+    data_size = pos
+    table = bytearray()
+    for i, (parts, is_file, _src, size) in enumerate(ents):
+        table += struct.pack(">IIQQII", name_offs[i], len(names[i]) + (-len(names[i])) % 16, file_offs[i] if is_file else 0, size if is_file else 0,
+                             3 | 0x80000000 if is_file else 4, 0)
+    head_data = bytes(table) + b"".join(nm + bytes((-len(nm)) % 16) for nm in names)
+    head_data += bytes((-len(head_data)) % 16)
+    meta = b"".join(struct.pack(">II", pid, len(v)) + v for pid, v in (
+        (1, struct.pack(">I", 2)), (2, struct.pack(">I", content_type)), (3, struct.pack(">I", 0x4e)), (4, struct.pack(">Q", data_size)),
+        (5, bytes.fromhex("15000100")), (8, bytes.fromhex("8102500001000100")), (9, bytes(8))))
+    meta += bytes(160 - len(meta))
+    data_off = 0xC0 + len(meta)
+    total = data_off + data_size + PKG_TRAILER
+    head = bytearray(0xC0)
+    head[0:4] = b"\x7fPKG"
+    struct.pack_into(">HHIIIIQQQ", head, 4, 0x8000, 1, 0xC0, 7, len(meta), n, total, data_off, data_size)
+    cid = content_id.encode("ascii")
+    head[0x30:0x30 + len(cid)] = cid
+    head[0x70:0x80] = iv
+    sha = hashlib.sha1()
+    done, stream = 0, 0
+    with open(dest, "wb") as g:
+        def put(b):
+            g.write(b)
+            sha.update(b)
+        put(bytes(head) + meta)
+
+        def seal(plain):
+            nonlocal stream
+            put(_xor(plain, ctr_keystream(enc, iv, stream, len(plain))))
+            stream += len(plain)
+        seal(head_data)
+        for (parts, is_file, src, size), off in zip(ents, file_offs):
+            if not is_file:
+                continue
+            got = 0
+            for chunk in read(src, size):
+                seal(chunk)
+                got += len(chunk)
+                done += len(chunk)
+                prog(done / max(1, sum(z for _p, f, _s, z in ents if f)))
+                if stopped():
+                    raise UnpackError("stopped")
+            if got != size:
+                raise UnpackError("a file changed while the package was being made")
+            pad = (-size) % 16
+            if pad:
+                seal(bytes(pad))
+        if stream != data_size:
+            raise UnpackError("the package came out the wrong size; it was discarded")
+        g.write(sha.digest() + bytes(PKG_TRAILER - 20))
 
 
 def find_rpcs3(configured=""):
@@ -8098,10 +8214,10 @@ class App:
                 mate = next((j for j in self.jobs if j.container == "ps3pkg" and j.pkgs[0]["title_id"] == job.pkgs[0]["title_id"]
                              and not j.status.startswith("Done")), None)
                 if mate is not None:
-                    twin = next((i for i in mate.pkgs if i["patch"] == job.pkgs[0]["patch"] and i["version"] == job.pkgs[0]["version"]), None)
+                    new = job.pkgs[0]
+                    twin = next((i for i in mate.pkgs if i["content_id"] == new["content_id"] and i["patch"] == new["patch"] and i["version"] == new["version"]), None)
                     if twin is not None:
-                        self.refuse(f.name, sentence(f"it is the same {'update' if twin['patch'] else 'game package'} as {twin['path'].name}, which is already in the list"),
-                                    "warn")
+                        self.refuse(f.name, sentence(f"it is the same package as {twin['path'].name}, which is already in the list"), "warn")
                         continue
                     mate.add_pkg(job)
                     have.add(str(f).lower())
@@ -8307,6 +8423,10 @@ class App:
         for dp, dn, fns in os.walk(p):
             if any(x.upper() == "PS3_GAME" for x in dn) and ps3_folder_info(Path(dp)) is not None:
                 games.append(Path(dp))                          # a PS3 game folder: taken whole
+                dn[:] = []
+                continue
+            if psn_folder_info(Path(dp)) is not None:
+                games.append(Path(dp))                          # a PlayStation Store game folder (as RPCS3 keeps it): taken whole
                 dn[:] = []
                 continue
             if any(x.lower() == "default.xex" for x in fns):
@@ -8704,7 +8824,7 @@ class App:
     def out_stem(self, job, o):
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
-        stem = job.home.name if job.container in ("xfolder", "ps3folder") else job.split_stem if job.container == "ps3parts" else job.home.stem
+        stem = job.home.name if job.container in ("xfolder", "ps3folder", "psnfolder") else job.split_stem if job.container == "ps3parts" else job.home.stem
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
@@ -9218,6 +9338,8 @@ class App:
             return self.do_join_ps3(job, o)
         if t == "zar":
             return self.do_to_zar(job, o)
+        if t == "pkg" and job.container == "psnfolder":
+            return self.do_folder_to_pkg(job, o)
         if t == "folder" and job.container == "ps3pkg":
             return self.do_pkg_to_folder(job, o)
         if t == "folder":
@@ -9623,8 +9745,8 @@ class App:
                                                                "and show it where rpcs3.exe is, or give it your key")
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
-        if not any(not i["patch"] for i in job.pkgs):
-            job.status, job.result = "Failed (no game)", "only an update was added. Add the game's own package too (the one that isn't an update)"
+        if not any(not i["patch"] and not i["dlc"] for i in job.pkgs):
+            job.status, job.result = "Failed (no game)", "only an update or extra content was added. Add the game's own package too (the one that isn't an update or DLC)"
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         out, skip = self.folder_target(job, o)
@@ -9644,7 +9766,7 @@ class App:
                 log = work / "log" / "RPCS3.log"
                 log.unlink(missing_ok=True)
                 cmd = [str(wexe), "--allow-any-location", "--headless", "--installpkg", str(info["path"])]
-                self.post("log", f"Installing {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else ""), "info")
+                self.post("log", f"Installing {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else "  (DLC)" if info["dlc"] else ""), "info")
                 si = None
                 if os.name == "nt":                         # RPCS3 crashes at start-up with no console at all, so it gets one that is hidden
                     si = subprocess.STARTUPINFO()
@@ -9724,7 +9846,7 @@ class App:
         try:
             work.mkdir(parents=True)
             for k, info in enumerate(job.pkgs):
-                self.post("log", f"Package {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else ""), "info")
+                self.post("log", f"Package {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else "  (DLC)" if info["dlc"] else ""), "info")
                 ents, read, close = pkg_source(info, key)
                 try:
                     if k:          # a file that is already there is only replaced when the update says so (as the console does)
@@ -9764,6 +9886,54 @@ class App:
                 self.post("log", "The game package was read back and checked; the updates written over it were not (they change files the check "
                                  "would compare).", "info")
             self.post("log", "The package sources were kept. No licence (RAP) is needed to unpack; keep yours for playing.", "info")
+
+    def do_folder_to_pkg(self, job, o):
+        """A PSN game folder -> a package that RPCS3 installs, sealed with the user's own key."""
+        key = parse_hex_key(o.get("pkg_key", ""))
+        if not key:
+            job.status, job.result = "Failed (setup needed)", "making a package needs your own package key (Settings, Formats, PlayStation 3: give it your key)"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".pkg"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        info = job.ps3_info
+        cid = pkg_content_id(info["id"], info.get("title", ""))
+        self.post("log", f"\n{job.path.name}  [game folder → PKG, sealed with your key]  (for RPCS3; a real console would also want Sony's signature, "
+                         "which nobody can make)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Building PKG")
+        stop = lambda: self.stop_flag  # noqa: E731
+        ents, read, close = ps3_folder_source(job.path, True)
+        try:
+            build_pkg(ents, read, part, key, cid, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            if verify:
+                self.post("log", "Reading the new package back against the folder…", "info")
+                e2, r2, c2 = pkg_source(pkg_info(part), key)
+                try:
+                    if not entries_match((ents, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
+                        raise UnpackError("the package that was built didn't match the folder it came from; it was discarded")
+                finally:
+                    c2()
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            close()
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
 
     def do_join_ps3(self, job, o):
         """The pieces of a split PS3 disc image -> one ISO."""
