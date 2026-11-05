@@ -5464,7 +5464,7 @@ def ps3_folder_source(path, keep_update=False):
 def fix_file_name(raw, enc="utf-8"):
     """A name from a disc image -> a name any computer accepts. Anything that would not do is changed to '_' (the caller says so)."""
     name = raw.decode(enc, "replace")
-    fixed = re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", name)
+    fixed = re.sub(r'[\x00-\x1f/\\:*?"<>|\ufffd]', "_", name)
     if fixed in ("", ".", ".."):
         fixed = "_" * max(1, len(fixed))
     if fixed[-1] in ". ":
@@ -5472,6 +5472,40 @@ def fix_file_name(raw, enc="utf-8"):
     if fixed.split(".")[0].upper() in _WIN_RESERVED:
         fixed = "_" + fixed
     return fixed
+
+
+def fix_entry_names(ents, enc="utf-8"):
+    """Entries [(path parts as bytes, is_file, src, size)] -> (the same with every name made usable on this computer, [(old, new)]).
+    A name that can't be a file name here is changed (and listed), and two names that would collide (this computer ignores
+    upper/lower case) are told apart with ~1, ~2."""
+    mapped, taken, renamed, out = {(): ()}, set(), [], []
+    for parts, is_file, src, size in ents:
+        parent = mapped.get(parts[:-1])
+        if parent is None:
+            parent = tuple(fix_file_name(x, enc) for x in parts[:-1])
+        nm = fix_file_name(parts[-1], enc)
+        base, n = nm, 0
+        while (parent, nm.lower()) in taken:
+            n += 1
+            stem, dot, ext = base.rpartition(".") if "." in base[1:] else (base, "", "")
+            nm = f"{stem}~{n}{dot}{ext}"
+        taken.add((parent, nm.lower()))
+        if nm != parts[-1].decode(enc, "replace"):
+            renamed.append((parts[-1].decode(enc, "replace"), nm))
+        mapped[parts] = parent + (nm,)
+        out.append((tuple(x.encode(enc) for x in parent + (nm,)), is_file, src, size))
+    return out, renamed
+
+
+def is_iso9660(path):
+    """True when a file starts like an ISO 9660 disc image (a volume descriptor at sector 16)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(16 * PS3_SECTOR)
+            d = f.read(8)
+        return d[:1] == b"\x01" and d[1:6] == b"CD001"
+    except OSError:
+        return False
 
 
 # ---- writing a disc image
@@ -6257,7 +6291,7 @@ def write_m3u_playlists(outputs, exists="Skip"):
 # --------------------------------------------------------------------------- App
 DEFAULTS = {
     "chdman": "", "compression": "Default", "custom_comp": "", "hunk": "", "threads": 0,
-    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "ps3_split": False, "ps3_update": False,
+    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
     "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
@@ -6637,9 +6671,11 @@ class App:
                         variable=v["auto_cue"]).grid(row=7, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(f, text="Make an .m3u playlist for multi-disc games (files named like 'Game (Disc 1)', 'Game (Disc 2)')",
                         variable=v["make_m3u"]).grid(row=10, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(f, text="Check that there is enough free disk space before each conversion (turn off only if you know better)",
+                        variable=v["space_check"]).grid(row=11, column=0, columnspan=2, sticky="w")
         if os.name == "nt" or sys.platform.startswith("linux"):
             cf = ttk.LabelFrame(f, text=" Right-click menu in Windows Explorer " if os.name == "nt" else " Right-click menu in your file manager ", padding=10)
-            cf.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+            cf.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10, 0))
             self.ctx_label = ttk.Label(cf, style="Muted.TLabel", wraplength=560, justify="left")
             self.ctx_label.grid(row=0, column=0, columnspan=2, sticky="w")
             self.ctx_btn = ttk.Button(cf, command=self.on_ctx_toggle)
@@ -8198,7 +8234,7 @@ class App:
             self.post("overall", i, total)
             self.post("label", f"[{i + 1}/{total}] {job.path.name}")
             try:
-                why = self.space_check(job, o)
+                why = self.space_check(job, o) if o.get("space_check", True) else None
             except Exception:  # noqa: BLE001  (a fault in the estimate must never block a conversion)
                 why = None
             if why:
@@ -9148,68 +9184,59 @@ class App:
         if o["delete_src"]:
             self.remove_sources(job, o)
 
-    def ps3_to_folder(self, job, dest, prog, path):
-        """The files of a PS3 disc image -> loose files in the folder dest. A name this computer can't use is changed (and listed in the log)
-        instead of stopping the whole disc. With 'verify' on, what was written is read back against the image."""
+    def unpack_entries(self, job, ents, read, dest, prog, enc, readback):
+        """Write the files of a disc image or archive into the folder dest. A name this computer can't use is changed (and listed in the
+        log and in the finished row) instead of stopping the whole disc. With 'verify' on, what was written is read back against the
+        source: readback(folder) -> (entries, read, close) of what is on disk."""
         verify = self.verify_wanted()
         stop = lambda: self.stop_flag  # noqa: E731
+        root = Path(dest).resolve()
+        fixed, renamed = fix_entry_names(ents, enc)
+        if renamed:
+            shown = "; ".join(f"{a!r} → {b!r}" for a, b in renamed[:6]) + (f"; and {len(renamed) - 6} more" if len(renamed) > 6 else "")
+            self.post("log", f"{job.path.name}: {len(renamed)} name(s) can't be used on this computer and were changed: {shown}", "warn")
+            job.note = f"{len(renamed)} name(s) changed, see the log"
+        total = sum(sz for _p, f, _o, sz in fixed if f) or 1
+        done = 0
+        for parts, is_file, src, size in fixed:
+            target = root.joinpath(*[x.decode(enc) for x in parts])
+            if root not in target.resolve().parents:
+                raise UnpackError("a name in the disc image points outside the folder it is being unpacked into; nothing was made")
+            if not is_file:
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "wb") as g:
+                for piece in read(src, size):
+                    g.write(piece)
+                    done += len(piece)
+                    prog(done / total * (0.6 if verify else 1.0))
+                    if stop():
+                        raise UnpackError("stopped")
+        if verify:
+            self.post("log", "Reading the new folder back against the source…", "info")
+            e2, r2, c2 = readback(root)
+            try:
+                if not entries_match((fixed, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
+                    raise UnpackError("the files that were written didn't match what they came from; they were discarded")
+            finally:
+                c2()
+
+    def ps3_to_folder(self, job, dest, prog, path):
+        """The files of a PS3 disc image (or any plain ISO 9660 disc) -> loose files in the folder dest."""
         info = ps3_iso_kind(path)
         if info and info.get("encrypted"):
             raise UnpackError("this PS3 disc image is still encrypted (its protected parts can't be read without your own disc key), so its files would "
                               "come out unreadable. Decrypt it first, or make a CHD of it, which keeps it exactly as it is")
         ents, read, close = ps3_iso_source(path)
         try:
-            root = Path(dest).resolve()
-            mapped, taken, renamed, fixed_ents = {(): ()}, set(), [], []
-            for parts, is_file, src, size in ents:
-                parent = mapped[parts[:-1]]
-                nm = fix_file_name(parts[-1])
-                base = nm
-                n = 0
-                while (parent, nm.lower()) in taken:
-                    n += 1
-                    stem, dot, ext = base.rpartition(".") if "." in base[1:] else (base, "", "")
-                    nm = f"{stem}~{n}{dot}{ext}"
-                taken.add((parent, nm.lower()))
-                if nm != parts[-1].decode("utf-8", "replace"):
-                    renamed.append((parts[-1].decode("utf-8", "replace"), nm))
-                mapped[parts] = parent + (nm,)
-                fixed_ents.append((tuple(x.encode("utf-8") for x in parent + (nm,)), is_file, src, size))
-            if renamed:
-                shown = "; ".join(f"{a!r} → {b!r}" for a, b in renamed[:6]) + (f"; and {len(renamed) - 6} more" if len(renamed) > 6 else "")
-                self.post("log", f"{job.path.name}: {len(renamed)} name(s) in the image can't be used on this computer and were changed: {shown}", "warn")
-                job.note = f"{len(renamed)} name(s) changed, see the log"
-            total = sum(sz for _p, f, _o, sz in fixed_ents if f) or 1
-            done = 0
-            for parts, is_file, src, size in fixed_ents:
-                target = root.joinpath(*[x.decode("utf-8") for x in parts])
-                if root not in target.resolve().parents:
-                    raise UnpackError("a name in the disc image points outside the folder it is being unpacked into; nothing was made")
-                if not is_file:
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with open(target, "wb") as g:
-                    for piece in read(src, size):
-                        g.write(piece)
-                        done += len(piece)
-                        prog(done / total * (0.6 if verify else 1.0))
-                        if stop():
-                            raise UnpackError("stopped")
-            if verify:
-                self.post("log", "Reading the new folder back against the disc image…", "info")
-                e2, r2, c2 = ps3_folder_source(root, True)
-                try:
-                    if not entries_match((fixed_ents, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
-                        raise UnpackError("the files that were written didn't match what they came from; they were discarded")
-                finally:
-                    c2()
+            self.unpack_entries(job, ents, read, dest, prog, "utf-8", lambda r: ps3_folder_source(r, True))
         finally:
             close()
         prog(1.0)
 
     def disc_to_folder(self, job, dest, prog, iso=None):
-        """The files of a disc image (or a ZAR) -> a game folder: Xbox 360 or PlayStation 3, whichever it is."""
+        """The files of a disc image (or a ZAR) -> a game folder: Xbox 360, PlayStation 3, or any other plain ISO 9660 disc."""
         if iso is None and job.container in ("zar", "xfolder"):
             return self.xbox_to_folder(job, dest, prog)
         path = iso or job.path
@@ -9217,13 +9244,15 @@ class App:
             return self.ps3_to_folder(job, dest, prog, path)
         if xbox_iso_kind(path) in ("360", "xbox"):
             return self.xbox_to_folder(job, dest, prog, iso=iso)
-        raise UnpackError("this isn't an Xbox 360 or PlayStation 3 disc image, so it can't become a game folder")
+        if is_iso9660(path):
+            self.post("log", f"{job.path.name}: not an Xbox 360 or PS3 disc, so its files are unpacked as a plain ISO 9660 disc.", "info")
+            return self.ps3_to_folder(job, dest, prog, path)
+        raise UnpackError("this isn't a disc image that can be unpacked to a folder (it is not an Xbox 360 disc, a PlayStation 3 disc or "
+                          "a plain ISO 9660 disc; UDF-only images aren't supported)")
 
     def xbox_to_folder(self, job, dest, prog, iso=None):
         """The files of an Xbox 360 ZAR or disc image -> loose files in the folder dest. With 'verify' on, what was written is
         read back against the source."""
-        verify = self.verify_wanted()
-        stop = lambda: self.stop_flag  # noqa: E731
         if iso is not None or self.xbox_job_is_iso(job):
             iso = iso or job.path
             if xbox_iso_kind(iso) not in ("360", "xbox"):
@@ -9232,32 +9261,7 @@ class App:
         else:
             ents, read, close = self.xbox_source(job)
         try:
-            root = Path(dest).resolve()
-            total = sum(sz for _p, f, _o, sz in ents if f) or 1
-            done = 0
-            for parts, is_file, src, size in ents:
-                target = root.joinpath(*[safe_file_name(x) for x in parts])
-                if root not in target.resolve().parents:
-                    raise UnpackError("a name in the archive points outside the folder it is being unpacked into; nothing was made")
-                if not is_file:
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with open(target, "wb") as g:
-                    for piece in read(src, size):
-                        g.write(piece)
-                        done += len(piece)
-                        prog(done / total * (0.6 if verify else 1.0))
-                        if stop():
-                            raise UnpackError("stopped")
-            if verify:
-                self.post("log", "Reading the new folder back against the source…", "info")
-                e2, r2, c2 = folder_source(root)
-                try:
-                    if not entries_match((ents, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
-                        raise UnpackError("the files that were written didn't match what they came from; they were discarded")
-                finally:
-                    c2()
+            self.unpack_entries(job, ents, read, dest, prog, "cp1252", folder_source)
         finally:
             close()
         prog(1.0)
@@ -10879,6 +10883,7 @@ def cli_main(argv):
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
     ap.add_argument("--rvz-block", type=int, metavar="KIB", help="RVZ block size in KiB, 32 to 2048 (default 128)")
     ap.add_argument("--no-m3u", action="store_true", help="don't write .m3u playlists for multi-disc games")
+    ap.add_argument("--no-space-check", action="store_true", help="don't check for enough free disk space before each conversion")
     ap.add_argument("--ps3-split", action="store_true", help="PS3: split ISOs of more than 4 GB into .iso.0, .iso.1 ... parts (for FAT32 drives)")
     ap.add_argument("--ps3-update", action="store_true", help="PS3: keep the PS3_UPDATE folder when making an ISO")
     ap.add_argument("--no-scrub", action="store_true", help="WBFS: keep all data, don't leave out what nothing uses")
@@ -10952,6 +10957,8 @@ def cli_main(argv):
             v["wbfs_scrub"].set(False)
         if a.no_m3u:
             v["make_m3u"].set(False)
+        if a.no_space_check:
+            v["space_check"].set(False)
         if a.ps3_split:
             v["ps3_split"].set(True)
         if a.ps3_update:
