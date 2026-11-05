@@ -46,7 +46,7 @@ SETTINGS_FILE = HERE / "chd_manager_settings.json"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -436,6 +436,8 @@ def decide_type(ext, size, platform):
         return "CD", "CUE/GDI/TOC images are CD-based"
     if ext in (".pbp", ".cdi", ".vcd"):
         return "CD", "PBP, CDI and VCD images are CD-based"
+    if ext == ".zar":
+        return "DVD", "Xbox 360 games are on DVDs"
     if platform == "PSP":
         return "DVD", "PSP UMD image"
     if size <= CD_MAX_BYTES:
@@ -490,7 +492,9 @@ def delete_forever(paths):
     ok = True
     for p in paths:
         try:
-            if Path(p).exists():
+            if Path(p).is_dir():
+                shutil.rmtree(p)
+            elif Path(p).exists():
                 Path(p).unlink()
         except OSError:
             ok = False
@@ -4064,13 +4068,13 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
 # how the CHD extraction code names each target
 TARGET_FMT = {"cue": "auto", "cue_split": "split", "cue_single": "single", "iso": "iso", "gdi": "auto", "pbp": "pbp",
-              "cdi": "cdi", "vcd": "vcd", "cso": "cso", "cso2": "cso2", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
+              "cdi": "cdi", "vcd": "vcd", "cso": "cso", "cso2": "cso2", "zar": "zar", "folder": "folder", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
 CUE_TYPE = {"AUDIO": "AUDIO", "MODE1/2048": "MODE1", "MODE1/2352": "MODE1_RAW", "MODE2/2352": "MODE2_RAW"}
 
 
@@ -4104,10 +4108,10 @@ def parse_cue_tracks(p):
 SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # What a target's file is, against the size of the unpacked disc. Compressed targets use a typical figure, not the
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
-SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
+SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
 SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
 
@@ -4154,6 +4158,8 @@ class Job:
         self.disc_count = 1            # discs inside a PBP
         self.m3u_chds = []             # for a playlist: its CHD files, one per disc
         self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
+        self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
+        self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.size = 0
         self._raw = None
         self.src_files = []
@@ -4187,6 +4193,8 @@ class Job:
                 return sum(chd_logical_size(c) or c.stat().st_size * 3 for c in self.m3u_chds)
             if self.container == "cso":
                 return read_cso_header(p)[0]
+            if self.container in ("zar", "xfolder"):
+                return self.zar_raw + 4 * XISO_MODULUS
             if self.container == "disc":
                 d = open_disc(p)
                 try:
@@ -4216,6 +4224,12 @@ class Job:
 
     def available_targets(self):
         """[(key, label)] of everything this item can safely become. Nothing is offered that is known not to work."""
+        if self.container == "zar":                 # Xbox 360: the files become a disc image, or a CHD of one
+            return [(k, target_label(k)) for k in ("chd", "iso", "folder")]
+        if self.container == "xfolder":
+            return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
+        if self.xbox:                               # an Xbox 360 ISO: a CHD of it, or Xenia's ZAR
+            return [(k, target_label(k)) for k in ("chd", "zar", "folder")]
         if self.container == "disc":                # GameCube / Wii: Dolphin's formats (a CHD of these runs nowhere)
             own = self.disc_info.get("format", "ISO").lower()
             if self.platform == "Wii U":
@@ -4247,7 +4261,7 @@ class Job:
             elif self.disc == "GD-ROM":
                 keys.append("gdi")
             elif self.disc == "DVD":
-                keys += ["iso", "cso", "zso", "cso2"]
+                keys += ["iso", "cso", "zso", "cso2", "zar", "folder"]
             else:
                 keys.append("auto")
             keys.append("verify")
@@ -4319,6 +4333,15 @@ class Job:
 
     def _analyze(self):
         p, ext = self.path, self.path.suffix.lower()
+        if p.is_dir():                              # an Xbox 360 game folder (the disc's files, with default.xex at the top)
+            ents = folder_source(p)[0]
+            if not any(len(pp) == 1 and pp[0].lower() == b"default.xex" and f for pp, f, _o, _s in ents):
+                raise ValueError("this folder doesn't look like an Xbox 360 game (there is no default.xex at its top level)")
+            self.container, self.platform, self.types = "xfolder", "Xbox 360", ["MODE1"]
+            self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
+            self.size, self.src_files = self.zar_raw, [p]
+            self.auto_type, self.reason = "DVD", "Xbox 360 game folder"
+            return
         if ext == ".chd":
             self.size = p.stat().st_size
             self.disc, self.types = chd_probe(p) if CHDMAN else ("?", [])
@@ -4361,6 +4384,19 @@ class Job:
             self.disc, self.platform, self.disc_count = "CD", "PS1", len(self.m3u_chds)
             self.src_files = [p] + self.m3u_chds
             self.size = sum(f.stat().st_size for f in self.src_files)
+            return
+        if ext == ".zar":
+            z = ZarArchive(p)
+            try:
+                ents = list(z.entries())
+            finally:
+                z.close()
+            if not any(len(pp) == 1 and pp[0].lower() == b"default.xex" and f for pp, f, _o, _s in ents):
+                raise ValueError("this ZAR doesn't look like an Xbox 360 game (there is no default.xex at its top level)")
+            self.container, self.platform, self.types = "zar", "Xbox 360", ["MODE1"]
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
+            self.auto_type, self.reason = decide_type(ext, self.zar_raw, "Xbox 360")
             return
         if ext in IMAGE_EXTS:
             tracks = read_image(p)
@@ -4419,6 +4455,11 @@ class Job:
         elif ext == ".cue":
             ty = [CUE_TYPE.get(t) for _, t in parse_cue_tracks(p)]
             self.types = ty if ty and None not in ty else []
+        if ext == ".iso" and not self.missing and not self.wrap_cue:
+            kind = xbox_iso_kind(p)
+            if kind:
+                self.platform, self.xbox = "Xbox 360" if kind == "360" else "Xbox", kind == "360"
+                self.auto_type, self.reason = "DVD", "Xbox disc image"
         if self.lone_bin:
             self.reason += " (BIN without a CUE)"
         if self.missing:
@@ -4438,9 +4479,642 @@ class Job:
                 fmt_size(self.size), self.status, self.result, str(self.path.parent))
 
 
+# --------------------------------------------------------------------------- Xbox 360: ZArchive (.zar) and the XISO disc image built from it
+# ZArchive (by Exzap, MIT-0) is a file archive with 64 KiB zstd blocks; Xenia uses it for Xbox 360 games, which it holds as
+# the disc's files. An XISO is the plain XDVDFS file system of an Xbox disc with those files in it (the layout extract-xiso
+# writes). It is rebuilt from the files, so it is not the original disc dump: the copy-protection data a console checks is not in
+# a ZAR and cannot be recreated. It is for emulators.
+ZAR_MAGIC, ZAR_VERSION, ZAR_BLOCK, ZAR_FOOTER = 0x169F52D6, 0x61BF3A01, 65536, 144
+XISO_SECTOR = 2048
+XISO_MAGIC = b"MICROSOFT*XBOX*MEDIA"
+XISO_ROOT_SECTOR = 0x108                  # where extract-xiso puts the root directory
+XISO_MODULUS = 0x10000                    # the image ends on a multiple of this
+XISO_BASES = (0, 0x0FD90000, 0x02080000, 0x18300000)       # where a disc dump's file system can start (none, XGD2, XGD3, XGD1)
+XISO_TIME = 0x01CA8E1E89D70700            # a fixed volume time (2010-01-01 UTC), so the same files always make the same image
+
+
+def _upper(b):
+    return bytes(c - 32 if 97 <= c <= 122 else c for c in b)
+
+
+class ZarArchive:
+    """Read a ZArchive: its files in the order of its tree, and any file's bytes."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.f = open(self.path, "rb")
+        try:
+            self._open()
+        except Exception:
+            self.f.close()
+            raise
+
+    def _open(self):
+        f = self.f
+        size = os.fstat(f.fileno()).st_size
+        if size <= ZAR_FOOTER:
+            raise UnpackError("this is not a ZAR file")
+        f.seek(size - ZAR_FOOTER)
+        v = struct.unpack(">12Q32sQII", f.read(ZAR_FOOTER))
+        self.footer_hash, total, version, magic = v[12], v[13], v[14], v[15]
+        if magic != ZAR_MAGIC or version != ZAR_VERSION or total != size:
+            raise UnpackError("this is not a ZAR file, or it is damaged or cut short")
+        sec = [(v[i], v[i + 1]) for i in range(0, 12, 2)]
+        if any(o + n > size for o, n in sec):
+            raise UnpackError("this ZAR's index points outside the file, so it is damaged")
+        (self.data_off, self.data_size), rec, names, tree = sec[0], sec[1], sec[2], sec[3]
+        if rec[1] % 40 or tree[1] % 16 or not rec[1] or not tree[1] or names[1] > 0x7FFFFFFF:
+            raise UnpackError("this ZAR's index is damaged")
+        f.seek(rec[0])
+        self.records = [(r[0], r[1:]) for r in struct.iter_unpack(">Q16H", f.read(rec[1]))]
+        f.seek(names[0])
+        self.names = f.read(names[1])
+        f.seek(tree[0])
+        self.tree = list(struct.iter_unpack(">IIII", f.read(tree[1])))
+        if self.tree[0][0] & 0x80000000 or self._name(self.tree[0][0] & 0x7FFFFFFF):
+            raise UnpackError("this ZAR's file tree is damaged")
+        self._dctx = None
+        self._cache = (-1, b"")
+
+    def close(self):
+        self.f.close()
+
+    def _name(self, off):
+        n = self.names
+        if off == 0x7FFFFFFF or off >= len(n):
+            return b""
+        ln = n[off] & 0x7F
+        if n[off] & 0x80:                       # a name of 128 characters or more: its length goes over two bytes
+            if off + 1 >= len(n):
+                return b""
+            ln |= n[off + 1] << 7
+            off += 2
+        else:
+            off += 1
+        return bytes(n[off:off + ln])
+
+    def entries(self):
+        """Yield (path as bytes parts, is_file, stream offset, size) for every file and folder, parents first."""
+        stack = [((), 0, 0)]
+        seen = 0
+        while stack:
+            parts, idx, depth = stack.pop()
+            if depth > 64:
+                raise UnpackError("this ZAR has folders nested too deeply")
+            e = self.tree[idx]
+            start, count = e[1], e[2]
+            if start + count > len(self.tree):
+                raise UnpackError("this ZAR's file tree is damaged")
+            kids = []
+            for i in range(start, start + count):
+                k = self.tree[i]
+                nm = self._name(k[0] & 0x7FFFFFFF)
+                if not nm:
+                    raise UnpackError("this ZAR has an item with no name")
+                is_file = bool(k[0] & 0x80000000)
+                if is_file:
+                    yield parts + (nm,), True, k[1] | ((k[3] & 0xFFFF) << 32), k[2] | ((k[3] >> 16) << 32)
+                else:
+                    yield parts + (nm,), False, 0, 0
+                    kids.append((parts + (nm,), i, depth + 1))
+                seen += 1
+                if seen > len(self.tree):
+                    raise UnpackError("this ZAR's file tree loops back on itself")
+            stack.extend(reversed(kids))
+
+    def _block(self, i):
+        if self._cache[0] == i:
+            return self._cache[1]
+        ri, si = divmod(i, 16)
+        if ri >= len(self.records):
+            raise UnpackError("this ZAR is damaged (a block is missing)")
+        base, sizes = self.records[ri]
+        off = base + sum(s + 1 for s in sizes[:si])
+        csize = sizes[si] + 1
+        if off + csize > self.data_size:
+            raise UnpackError("this ZAR is damaged (a block lies outside the data)")
+        self.f.seek(self.data_off + off)
+        raw = self.f.read(csize)
+        if len(raw) != csize:
+            raise UnpackError("this ZAR is cut short")
+        if csize == ZAR_BLOCK:
+            data = raw
+        else:
+            try:
+                import zstandard
+            except ImportError:
+                raise UnpackError("a ZAR is compressed with zstd, which needs the 'zstandard' package") from None
+            if self._dctx is None:
+                self._dctx = zstandard.ZstdDecompressor()
+            try:
+                data = self._dctx.decompress(raw, max_output_size=ZAR_BLOCK)
+            except zstandard.ZstdError as e:
+                raise UnpackError(f"this ZAR is damaged (block {i}: {e})") from None
+            if len(data) != ZAR_BLOCK:
+                raise UnpackError(f"this ZAR is damaged (block {i} has the wrong size)")
+        self._cache = (i, data)
+        return data
+
+    def read(self, offset, size, chunk=1 << 20):
+        """Yield the bytes of stream[offset:offset+size] in pieces of at most `chunk`."""
+        end = offset + size
+        pos = offset
+        out = []
+        have = 0
+        while pos < end:
+            b = self._block(pos // ZAR_BLOCK)
+            a = pos % ZAR_BLOCK
+            piece = b[a:a + min(ZAR_BLOCK - a, end - pos)]
+            out.append(piece)
+            have += len(piece)
+            pos += len(piece)
+            if have >= chunk:
+                yield b"".join(out)
+                out, have = [], 0
+        if out:
+            yield b"".join(out)
+
+    def hash_ok(self, progress=lambda x: None, stopped=lambda: False):
+        """The archive carries a SHA-256 of itself: check it."""
+        import hashlib
+        size = os.fstat(self.f.fileno()).st_size
+        h = hashlib.sha256()
+        self.f.seek(0)
+        left = size - ZAR_FOOTER
+        while left:
+            b = self.f.read(min(left, 4 << 20))
+            if not b:
+                return False
+            h.update(b)
+            left -= len(b)
+            progress(1 - left / size)
+            if stopped():
+                raise UnpackError("stopped")
+        foot = bytearray(self.f.read(ZAR_FOOTER))
+        foot[96:128] = bytes(32)
+        h.update(foot)
+        return h.digest() == self.footer_hash
+
+
+class _XNode:
+    __slots__ = ("name", "is_dir", "size", "src", "kids", "sector", "tsize", "order", "pos", "left", "right")
+
+    def __init__(self, name, is_dir, size=0, src=None):
+        self.name, self.is_dir, self.size, self.src = name, is_dir, size, src
+        self.kids, self.sector, self.tsize, self.order = [], 0, 0, []
+        self.pos = self.left = self.right = 0
+
+
+def xiso_tree(entries):
+    """[(path parts, is_file, src, size)] -> the root _XNode, checking what XDVDFS can hold."""
+    root = _XNode(b"", True)
+    index = {(): root}
+    for parts, is_file, src, size in entries:
+        parent = index.get(parts[:-1])
+        if parent is None or not parent.is_dir:
+            raise UnpackError("the archive lists an item before the folder it is in")
+        name = parts[-1]
+        if len(name) > 255 or not name:
+            raise UnpackError(f"a name is too long for an Xbox disc (255 characters at most): {name[:40].decode('latin1')}...")
+        if any(_upper(k.name) == _upper(name) for k in parent.kids):
+            raise UnpackError(f"two items in one folder differ only in upper/lower case ({name.decode('latin1')}), which an Xbox disc cannot hold")
+        node = _XNode(name, not is_file, size if is_file else 0, src)
+        parent.kids.append(node)
+        index[parts] = node
+    return root
+
+
+def _xiso_balance(nodes):
+    """A balanced search tree over names sorted the Xbox way (ASCII upper case); -> (root, in pre-order)."""
+    nodes = sorted(nodes, key=lambda n: _upper(n.name))
+    order = []
+
+    def build(lo, hi):
+        if lo >= hi:
+            return None
+        mid = (lo + hi) // 2
+        n = nodes[mid]
+        order.append(n)
+        n.left = build(lo, mid)
+        n.right = build(mid + 1, hi)
+        return n
+    root = build(0, len(nodes))
+    return root, order
+
+
+def _xiso_dir_plan(d):
+    """Work out where every entry of directory d sits in its table: d.order (pre-order) with .pos, and d.tsize."""
+    root, order = _xiso_balance(d.kids)
+    d.order = order
+    pos = 0
+    for n in order:
+        ln = (14 + len(n.name) + 3) & ~3
+        if pos % XISO_SECTOR + ln > XISO_SECTOR:
+            pos = (pos // XISO_SECTOR + 1) * XISO_SECTOR
+        n.pos = pos
+        pos += ln
+    d.tsize = max(XISO_SECTOR, (pos + XISO_SECTOR - 1) // XISO_SECTOR * XISO_SECTOR)
+
+
+def _xiso_dir_bytes(d):
+    out = bytearray(b"\xff" * d.tsize)
+    for n in d.order:
+        left = n.left.pos // 4 if n.left else 0
+        right = n.right.pos // 4 if n.right else 0
+        e = struct.pack("<HHIIBB", left, right, n.sector, n.tsize if n.is_dir else n.size, 0x10 if n.is_dir else 0x20, len(n.name)) + n.name
+        out[n.pos:n.pos + len(e)] = e
+    return bytes(out)
+
+
+def xiso_layout(root):
+    """Give every directory table and file its sector (extract-xiso's order). -> (list in disc order, total sectors)."""
+    _walk = [root]
+    while _walk:
+        d = _walk.pop()
+        _xiso_dir_plan(d)
+        _walk += [k for k in d.kids if k.is_dir]
+    root.sector = XISO_ROOT_SECTOR
+    nxt = XISO_ROOT_SECTOR + root.tsize // XISO_SECTOR
+    items = [root]
+
+    def alloc(d):
+        nonlocal nxt
+        for c in d.order:
+            c.sector = nxt
+            if c.is_dir:
+                nxt += c.tsize // XISO_SECTOR
+                items.append(c)
+                alloc(c)
+            else:
+                nxt += (c.size + XISO_SECTOR - 1) // XISO_SECTOR
+                if c.size:
+                    items.append(c)
+    alloc(root)
+    return items, nxt
+
+
+def build_xiso(entries, out_path, read, progress=lambda x: None, stopped=lambda: False):
+    """Write an XISO of `entries` [(path parts, is_file, src, size)]; read(src, size) yields each file's bytes in pieces."""
+    root = xiso_tree(entries)
+    items, sectors = xiso_layout(root)
+    total = sum(n.size for n in items if not n.is_dir) or 1
+    done = 0
+    pos = 0
+    with open(out_path, "wb") as g:
+        def zeros(upto):
+            nonlocal pos
+            while pos < upto:
+                n = min(upto - pos, 1 << 20)
+                g.write(bytes(n))
+                pos += n
+        zeros(0x10000)
+        head = bytearray(XISO_SECTOR)
+        head[:20] = XISO_MAGIC
+        head[20:28] = struct.pack("<II", XISO_ROOT_SECTOR, root.tsize)
+        head[28:36] = struct.pack("<Q", XISO_TIME)
+        head[0x7EC:0x800] = XISO_MAGIC
+        g.write(head)
+        pos += XISO_SECTOR
+        for n in items:
+            zeros(n.sector * XISO_SECTOR)
+            if n.is_dir:
+                g.write(_xiso_dir_bytes(n))
+                pos += n.tsize
+            else:
+                wrote = 0
+                for piece in read(n.src, n.size):
+                    g.write(piece)
+                    wrote += len(piece)
+                    done += len(piece)
+                    progress(done / total)
+                    if stopped():
+                        raise UnpackError("stopped")
+                if wrote != n.size:
+                    raise UnpackError("a file came out shorter than the archive says")
+                pos += wrote
+                zeros((pos + XISO_SECTOR - 1) // XISO_SECTOR * XISO_SECTOR)
+        zeros((pos + XISO_MODULUS - 1) // XISO_MODULUS * XISO_MODULUS)
+    progress(1.0)
+
+
+def xiso_files(path, root_only=False):
+    """-> (base offset, [(path parts as bytes, is_file, absolute offset, size)]) of an XISO or an Xbox disc dump."""
+    with open(path, "rb") as f:
+        for base in XISO_BASES:
+            f.seek(base + 0x10000)
+            h = f.read(XISO_SECTOR)
+            if len(h) == XISO_SECTOR and h[:20] == XISO_MAGIC and h[0x7EC:0x800] == XISO_MAGIC:
+                break
+        else:
+            raise UnpackError("this is not an Xbox disc image (no XDVDFS volume was found)")
+        root_sector, root_size = struct.unpack("<II", h[20:28])
+        out = []
+        seen = 0
+
+        def walk(sector, size, parts, depth):
+            nonlocal seen
+            if depth > 64 or size > 1 << 28:
+                raise UnpackError("this disc image's folders are damaged")
+            f.seek(base + sector * XISO_SECTOR)
+            tab = f.read(size)
+            stack = [0]
+            visited = set()
+            while stack:
+                p = stack.pop()
+                if p in visited or p + 14 > len(tab):
+                    continue
+                visited.add(p)
+                left, right, sec, sz, attr, nl = struct.unpack("<HHIIBB", tab[p:p + 14])
+                if left == 0xFFFF and right == 0xFFFF:
+                    continue
+                name = tab[p + 14:p + 14 + nl]
+                seen += 1
+                if seen > 5_000_000:
+                    raise UnpackError("this disc image has too many items")
+                if attr & 0x10:
+                    out.append((parts + (name,), False, 0, 0))
+                    if sz and not root_only:
+                        walk(sec, sz, parts + (name,), depth + 1)
+                else:
+                    out.append((parts + (name,), True, base + sec * XISO_SECTOR, sz))
+                if left:
+                    stack.append(left * 4)
+                if right:
+                    stack.append(right * 4)
+        walk(root_sector, root_size, (), 0)
+        return base, out
+
+
+def xbox_iso_kind(path):
+    """'360' for an XDVDFS disc image with a default.xex at its top, 'xbox' for one with default.xbe, else None."""
+    try:
+        _, ents = xiso_files(path, root_only=True)
+    except (UnpackError, OSError, struct.error):
+        return None
+    top = {p[0].lower() for p, f, _o, _s in ents if f and len(p) == 1}
+    return "360" if b"default.xex" in top else "xbox" if b"default.xbe" in top else None
+
+
+def iso_source(path):
+    """(entries, read, close) for the files inside an XISO on disk."""
+    _, ents = xiso_files(path)
+    f = open(path, "rb")
+
+    def read(off, size, chunk=1 << 20):
+        f.seek(off)
+        while size > 0:
+            b = f.read(min(chunk, size))
+            if not b:
+                raise UnpackError("the disc image is shorter than its file table says")
+            size -= len(b)
+            yield b
+    return ents, read, f.close
+
+
+def folder_source(path):
+    """(entries, read, close) for the files in a game folder (names must fit an Xbox disc: Windows-1252 text)."""
+    path = Path(path)
+    ents = []
+    for dp, dns, fns in os.walk(path):
+        dns.sort(key=lambda x: x.lower())
+        rel = Path(dp).relative_to(path).parts
+        try:
+            for d in dns:
+                ents.append((tuple(x.encode("cp1252") for x in rel + (d,)), False, None, 0))
+            for fn in sorted(fns, key=lambda x: x.lower()):
+                fp = Path(dp, fn)
+                ents.append((tuple(x.encode("cp1252") for x in rel + (fn,)), True, fp, fp.stat().st_size))
+        except UnicodeEncodeError:
+            raise UnpackError("a file or folder name has characters an Xbox disc can't hold (it must be plain Western text)") from None
+
+    def read(fp, size, chunk=1 << 20):
+        with open(fp, "rb") as f:
+            while size > 0:
+                b = f.read(min(chunk, size))
+                if not b:
+                    raise UnpackError(f"{Path(fp).name} is shorter than it was a moment ago")
+                size -= len(b)
+                yield b
+    return ents, read, lambda: None
+
+
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def safe_file_name(raw):
+    """A name from a disc image or archive -> text that is safe to use as a file name on any system (no paths, no tricks)."""
+    try:
+        name = raw.decode("cp1252")
+    except UnicodeDecodeError:
+        raise UnpackError("a name in the archive isn't readable text") from None
+    if (not name or name in (".", "..") or re.search(r'[\x00-\x1f/\\:*?"<>|]', name) or name[-1] in ". "
+            or name.split(".")[0].upper() in _WIN_RESERVED):
+        raise UnpackError(f"a name in this disc image can't be used as a file name on this computer: {name[:40]!r}")
+    return name
+
+
+def zar_source(path):
+    z = ZarArchive(path)
+    return list(z.entries()), z.read, z.close
+
+
+def _rebuffer(gen, n):
+    """Re-cut a stream of byte pieces into pieces of exactly n bytes (the last may be shorter)."""
+    buf = bytearray()
+    for piece in gen:
+        buf += piece
+        while len(buf) >= n:
+            yield bytes(buf[:n])
+            del buf[:n]
+    if buf:
+        yield bytes(buf)
+
+
+def entries_match(a, b, progress=lambda x: None, stopped=lambda: False):
+    """True when two sources (entries, read) hold the same folders and files with the same bytes. Names compare without case."""
+    ea, ra = a
+    eb, rb = b
+    ma = {tuple(_upper(x) for x in p): (f, o, s) for p, f, o, s in ea}
+    mb = {tuple(_upper(x) for x in p): (f, o, s) for p, f, o, s in eb}
+    if ma.keys() != mb.keys():
+        return False
+    total = sum(v[2] for v in ma.values() if v[0]) or 1
+    done = 0
+    for k, (is_file, oa, sa) in ma.items():
+        fb, ob, sb = mb[k]
+        if fb != is_file or (is_file and sa != sb):
+            return False
+        if is_file and sa:
+            for pa, pb in zip(_rebuffer(ra(oa, sa), 1 << 20), _rebuffer(rb(ob, sb), 1 << 20)):
+                if pa != pb:
+                    return False
+                done += len(pa)
+                progress(done / total)
+                if stopped():
+                    raise UnpackError("stopped")
+    return True
+
+
+def _lower(b):
+    return bytes(c + 32 if 65 <= c <= 90 else c for c in b)
+
+
+def write_zar(out_path, entries, read, progress=lambda x: None, stopped=lambda: False, level=6):
+    """Write a ZArchive of `entries` [(path parts as bytes, is_file, src, size)]; read(src, size) yields each file's bytes.
+    Files are stored in the order given, back to back, in 64 KiB blocks of zstd (a block that doesn't shrink is stored as it is)."""
+    import hashlib
+    try:
+        import zstandard
+    except ImportError:
+        raise UnpackError("making a ZAR needs the 'zstandard' package") from None
+
+    class N:
+        __slots__ = ("name", "is_file", "off", "size", "kids", "nidx", "start")
+
+        def __init__(self, name, is_file, off=0, size=0):
+            self.name, self.is_file, self.off, self.size, self.kids, self.nidx, self.start = name, is_file, off, size, [], 0, 0
+
+    root = N(b"", False)
+    index = {(): root}
+    names, name_at = [], {}
+
+    def nidx(nm):
+        if nm not in name_at:
+            name_at[nm] = len(names)
+            names.append(nm)
+        return name_at[nm]
+
+    def make_dir(parts):
+        node = index.get(parts)
+        if node is None:
+            parent = make_dir(parts[:-1])
+            node = N(parts[-1], False)
+            node.nidx = nidx(node.name)
+            parent.kids.append(node)
+            index[parts] = node
+        return node
+
+    stream, files = 0, []
+    for parts, is_file, src, size in entries:
+        nm = parts[-1]
+        if not nm or len(nm) > 0x7FFF:
+            raise UnpackError("a name is empty or too long for a ZAR")
+        parent = make_dir(parts[:-1])
+        if any(_lower(k.name) == _lower(nm) for k in parent.kids):
+            raise UnpackError(f"two items in one folder differ only in upper/lower case ({nm.decode('latin1')}), which a ZAR cannot hold")
+        if not is_file:
+            make_dir(parts)
+            continue
+        node = N(nm, True, stream, size)
+        node.nidx = nidx(nm)
+        parent.kids.append(node)
+        index[parts] = node
+        files.append((node, src, size))
+        stream += size
+    if not stream:
+        raise UnpackError("there are no files to put in the archive")
+
+    comp = zstandard.ZstdCompressor(level=level)
+    h = hashlib.sha256()
+    pos = 0
+    records = []
+    nblocks = 0
+    pending = bytearray()
+    BATCH = 64 * ZAR_BLOCK
+
+    with open(out_path, "wb") as out:
+        def put(b):
+            nonlocal pos
+            out.write(b)
+            h.update(b)
+            pos += len(b)
+
+        def store(blocks):
+            nonlocal nblocks
+            try:
+                res = comp.multi_compress_to_buffer(blocks, threads=-1)
+                packed = [res[i].tobytes() for i in range(len(blocks))]
+            except (AttributeError, TypeError):
+                packed = [comp.compress(b) for b in blocks]
+            for raw, c in zip(blocks, packed):
+                at = pos
+                if len(c) >= ZAR_BLOCK:
+                    c = raw
+                put(c)
+                if nblocks % 16 == 0:
+                    records.append([at, [0] * 16])
+                records[-1][1][nblocks % 16] = len(c) - 1
+                nblocks += 1
+
+        def flush(final=False):
+            nonlocal pending
+            n = len(pending) // ZAR_BLOCK
+            if n >= (1 if final else 64):
+                blocks = [bytes(pending[i * ZAR_BLOCK:(i + 1) * ZAR_BLOCK]) for i in range(n)]
+                del pending[:n * ZAR_BLOCK]
+                store(blocks)
+
+        done = 0
+        for node, src, size in files:
+            got = 0
+            for piece in read(src, size):
+                pending += piece
+                got += len(piece)
+                done += len(piece)
+                if len(pending) >= BATCH:
+                    flush()
+                progress(done / stream * 0.98)
+                if stopped():
+                    raise UnpackError("stopped")
+            if got != size:
+                raise UnpackError("a file came out shorter than expected")
+        if pending:
+            pending += bytes(-len(pending) % ZAR_BLOCK)
+        flush(final=True)
+        data_size = pos
+        put(bytes(-pos % 8))
+        rec_off = pos
+        for base, sizes in records:
+            put(struct.pack(">Q16H", base, *sizes))
+        rec_size = pos - rec_off
+        names_off = pos
+        offs = []
+        cur = 0
+        for nm in names:
+            offs.append(cur)
+            hdr = bytes((len(nm) & 0x7F | 0x80, len(nm) >> 7)) if len(nm) >= 0x80 else bytes((len(nm),))
+            put(hdr + nm)
+            cur += len(hdr) + len(nm)
+        names_size = pos - names_off
+        tree_off = pos
+        order, i, nxt = [root], 0, 1
+        while i < len(order):
+            node = order[i]
+            i += 1
+            if not node.is_file:
+                node.kids.sort(key=lambda k: _lower(k.name))
+                node.start = nxt
+                nxt += len(node.kids)
+                order += node.kids
+        for node in order:
+            nm_off = 0x7FFFFFFF if node is root else offs[node.nidx]
+            if node.is_file:
+                put(struct.pack(">IIII", nm_off | 0x80000000, node.off & 0xFFFFFFFF, node.size & 0xFFFFFFFF,
+                                ((node.off >> 32) & 0xFFFF) | (((node.size >> 32) & 0xFFFF) << 16)))
+            else:
+                put(struct.pack(">IIII", nm_off, node.start, len(node.kids), 0))
+        tree_size = pos - tree_off
+        secs = (0, data_size, rec_off, rec_size, names_off, names_size, tree_off, tree_size, pos, 0, pos, 0)
+        total = pos + ZAR_FOOTER
+        h.update(struct.pack(">12Q32sQII", *secs, bytes(32), total, ZAR_VERSION, ZAR_MAGIC))
+        out.write(struct.pack(">12Q32sQII", *secs, h.digest(), total, ZAR_VERSION, ZAR_MAGIC))
+    progress(1.0)
+
+
 # --------------------------------------------------------------------------- Linux / macOS: what has to be installed, and why
 LINUX_PKGS = {"chdman": {"apt": "mame-tools", "dnf": "mame-tools", "pacman": "mame-tools", "brew": "rom-tools"},
-              "tkdnd": {"apt": "tkdnd", "dnf": "tkdnd"}}
+              "tkdnd": {"apt": "tkdnd", "dnf": "tkdnd"},
+              "zstandard": {"apt": "python3-zstandard", "dnf": "python3-zstandard", "pacman": "python-zstandard"}}
 LINUX_WHY = {
     "chdman": ("CHD Manager is the friendly front end. chdman, part of MAME's tools, is the program that actually makes and reads "
                "CHD files, and CHD Manager asks it to do that work. Without chdman nothing can be turned into a CHD or back, and most "
@@ -4449,8 +5123,11 @@ LINUX_WHY = {
                "it has to come from your system's package manager."),
     "tkdnd": ("Lets you drag files and folders from your file manager onto this window. It is optional: Add Files, Add Folder and "
               "the right-click menu all work without it."),
+    "zstandard": ("Reads and writes zstd compression, which two formats use: Wii/GameCube RVZ files and Xbox 360 ZAR archives. "
+                  "It is optional: every other format works without it."),
 }
-LINUX_NAMES = {"chdman": "chdman (needed for CHD files)", "tkdnd": "Drag and drop (optional)"}
+LINUX_NAMES = {"chdman": "chdman (needed for CHD files)", "tkdnd": "Drag and drop (optional)",
+               "zstandard": "zstd compression (optional: RVZ and Xbox 360 ZAR)"}
 
 
 def linux_pkg_manager():
@@ -4479,14 +5156,14 @@ def linux_install_command(piece):
 
 # --------------------------------------------------------------------------- Linux right-click menu (KDE Dolphin, GNOME Files, "Open with")
 LINUX_MIME = "application/x-chdmanager-disc"
-LINUX_NEW_EXTS = (".pbp", ".vcd", ".zso", ".ecm", ".rvz", ".wia", ".wbfs", ".gcz", ".ciso", ".wux", ".wud", ".gcm", ".nrg", ".mds",
+LINUX_NEW_EXTS = (".zar", ".pbp", ".vcd", ".zso", ".ecm", ".rvz", ".wia", ".wbfs", ".gcz", ".ciso", ".wux", ".wud", ".gcm", ".nrg", ".mds",
                   ".mdf", ".ccd")   # types Linux doesn't know: registered as LINUX_MIME (the ones it does know are listed below instead)
 LINUX_SYS_MIMES = ("application/x-iso9660-image", "application/x-cd-image", "application/vnd.efi.iso", "application/vnd.efi.img",
                    "application/x-cue", "application/x-gd-rom-cue", "application/x-cdrdao-toc", "application/x-discjuggler-cd-image",
                    "application/x-compressed-iso", "application/x-mame-chd", "application/x-raw-disk-image", "application/x-nrg",
                    "application/x-gamecube-rom", "application/x-wii-rom", "application/x-gamecube-iso-image",
                    "application/x-wii-iso-image", "application/x-wbfs")
-LINUX_TO = ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "rvz", "gcz", "wia", "wbfs", "ciso")
+LINUX_TO = ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder")
 
 
 def linux_data_home():
@@ -4569,8 +5246,8 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso")}
-CTX_FOLDER = ("chd", "cue", "iso")                              # what a folder's 'Convert to' offers
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder")}
+CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
 CTX_DIR = r"Software\Classes\Directory"
@@ -5469,7 +6146,12 @@ class App:
             pass
         w, fr = self.themed_dialog("What to install")
         self.linux_win = w
-        have = {"chdman": bool(CHDMAN), "tkdnd": self.dnd_ok}
+        try:
+            import zstandard  # noqa: F401
+            has_zstd = True
+        except ImportError:
+            has_zstd = False
+        have = {"chdman": bool(CHDMAN), "tkdnd": self.dnd_ok, "zstandard": has_zstd}
         ttk.Label(fr, justify="left", wraplength=520, text=(
             "CHD Manager uses a few things from your system. Here is what each one is for, whether it was found, and the command "
             "that installs it. The program never installs anything by itself: you copy the command and run it in a terminal, and "
@@ -5481,7 +6163,7 @@ class App:
                 "installed into them, so these commands may need repeating after an update. Treat this as experimental.")
                       ).grid(row=r, column=0, columnspan=2, sticky="w", pady=(10, 0))
             r += 1
-        for piece in ("chdman", "tkdnd"):
+        for piece in ("chdman", "tkdnd", "zstandard"):
             box = ttk.LabelFrame(fr, text=f" {LINUX_NAMES[piece]}: {'found' if have[piece] else 'not found'} ", padding=10)
             box.grid(row=r, column=0, columnspan=2, sticky="ew", pady=(12, 0))
             r += 1
@@ -5613,7 +6295,7 @@ class App:
         self.update_status_idle()
 
     GENERIC_TARGETS = (("chd", "→ CHD"), ("cue", "→ CUE/BIN"), ("iso", "→ ISO"), ("pbp", "→ PlayStation PBP"),
-                       ("cdi", "→ DiscJuggler CDI"), ("vcd", "→ POPStarter VCD"), ("cso", "→ CSO"), ("cso2", "→ CSO version 2 (real PSP only)"), ("zso", "→ ZSO"), ("ecm", "→ ECM"),
+                       ("cdi", "→ DiscJuggler CDI"), ("vcd", "→ POPStarter VCD"), ("cso", "→ CSO"), ("cso2", "→ CSO version 2 (real PSP only)"), ("zar", "→ ZAR (Xbox 360)"), ("folder", "→ Game folder (Xbox 360)"), ("zso", "→ ZSO"), ("ecm", "→ ECM"),
                        ("rvz", "→ RVZ (Wii / GameCube)"), ("wbfs", "→ WBFS (Wii)"), ("gcz", "→ GCZ"), ("wux", "→ WUX (Wii U)"), ("wud", "→ WUD (Wii U)"), ("verify", "Verify (CHD files)"),
                        ("recompress", "Recompress (CHD files)"))
 
@@ -5926,7 +6608,7 @@ class App:
     def add_files_dialog(self):
         files = filedialog.askopenfilenames(
             title="Select disc images or CHD files", initialdir=self.settings.get("last_dir") or None,
-            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.mds *.nrg *.ccd *.img *.m3u *.chd"), ("All files", "*.*")])
+            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.zar *.mds *.nrg *.ccd *.img *.m3u *.chd"), ("All files", "*.*")])
         if files:
             self.settings["last_dir"] = str(Path(files[0]).parent)
             self.add_paths(files)
@@ -6157,7 +6839,13 @@ class App:
     def scan_folder(self, p, archives=True):
         """The disc files in a folder tree -> ([paths], {ignored extension: count})."""
         found, ignored = [], {}
-        allf = [Path(dp) / fn for dp, _, fns in os.walk(p) for fn in fns]
+        allf, games = [], []
+        for dp, dn, fns in os.walk(p):
+            if any(x.lower() == "default.xex" for x in fns):
+                games.append(Path(dp))                          # an Xbox 360 game folder: taken whole
+                dn[:] = []
+                continue
+            allf += [Path(dp) / fn for fn in fns]
         referenced = set()
         for f in allf:
             e = f.suffix.lower()
@@ -6165,7 +6853,7 @@ class App:
             referenced.update(str(r).lower() for r in refs)
         for f in sorted(allf):
             e = f.suffix.lower()
-            if e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
+            if e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
                                     ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
@@ -6176,7 +6864,7 @@ class App:
                 ignored[e] = ignored.get(e, 0) + 1
             elif e in ARCHIVE_EXTS and archives:
                 found.append(f)
-        return found, ignored
+        return sorted(games) + found, ignored
 
     def pumped(self, fn):
         """Run fn in a thread while the window keeps answering; returns the exception it raised, or None."""
@@ -6501,7 +7189,7 @@ class App:
     def out_stem(self, job, o):
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
-        stem = job.home.stem
+        stem = job.home.name if job.container == "xfolder" else job.home.stem
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
@@ -6558,14 +7246,14 @@ class App:
             if t == "wbfs" and job.platform == "Wii" and o["wbfs_scrub"] and not WII_KEYS[0]:
                 extra = raw                                  # the scrubbed ISO Dolphin makes first
         elif ext == ".chd":
-            if t in ("cso", "cso2", "zso", "ecm", "pbp", "cdi", "vcd", "cue_fix") or (t == "iso" and job.disc == "CD"):
+            if t in ("cso", "cso2", "zso", "ecm", "pbp", "cdi", "vcd", "zar", "folder", "cue_fix") or (t == "iso" and job.disc == "CD"):
                 extra = raw                                  # extracted to a temporary folder first
         elif job.kind == "convert":
             extra = raw if job.container else 0              # PBP / CDI / images are unpacked first
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container == "cso") or t in ("cue_fix", "art")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder")) or t in ("cue_fix", "art", "zar", "folder")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         out = self.output_path(job, o, SPACE_EXT.get(t, ".x"), make=False).parent
@@ -6646,6 +7334,12 @@ class App:
         if job.container == "cso":
             iso = Path(outdir) / f"{tag}.iso"
             cso_to_iso(job.path, iso, prog, stopped)
+            return iso
+        if job.container in ("zar", "xfolder"):
+            if not iso_ok:
+                raise UnpackError("an Xbox 360 disc is a DVD, and this chdman is too old to make those (get one from MAME 0.255 or later)")
+            iso = Path(outdir) / f"{tag}.iso"
+            self.xbox_to_xiso(job, iso, prog)
             return iso
         if job.container == "ecm":
             out_bin = Path(outdir) / f"{tag}.bin"
@@ -6916,6 +7610,10 @@ class App:
             return self.extract_to_cso(job, o, lz4=fmt == "zso")
         if fmt == "ecm":
             return self.extract_to_ecm(job, o)
+        if fmt == "zar":
+            return self.extract_to_zar(job, o)
+        if fmt == "folder":
+            return self.extract_to_folder(job, o)
         if fmt == "vcd":
             return self.extract_to_vcd(job, o)
         if fmt == "fix":
@@ -6983,6 +7681,12 @@ class App:
             return self.do_cso_convert(job, o, lz4=t == "zso")
         if t == "iso" and job.container == "cso":
             return self.do_cso_to_iso(job, o)
+        if t == "iso" and job.container in ("zar", "xfolder"):
+            return self.do_zar_to_iso(job, o)
+        if t == "zar":
+            return self.do_to_zar(job, o)
+        if t == "folder":
+            return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
 
     def export_via_chd(self, job, o):
@@ -7156,6 +7860,317 @@ class App:
         except OSError as e:
             job.status, job.result = "Failed (disk)", str(e)
             self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            part.unlink(missing_ok=True)
+
+    def xbox_source(self, job):
+        """(entries, read, close) for the files of an Xbox 360 job: a ZAR, a game folder or an XISO."""
+        if job.container == "zar":
+            return zar_source(job.path)
+        if job.container == "xfolder":
+            return folder_source(job.path)
+        return iso_source(job.path)
+
+    def verify_wanted(self):
+        o = getattr(self, "cur_opts", {})
+        return bool(o.get("verify_after") or o.get("delete_src"))
+
+    def xbox_to_xiso(self, job, dest, prog):
+        """The files of an Xbox 360 ZAR or game folder -> an XISO at dest. With 'verify' on, a ZAR's own checksum is checked first
+        and the finished image is read back against the source."""
+        verify = self.verify_wanted()
+        stop = lambda: self.stop_flag  # noqa: E731
+        if verify and job.container == "zar":
+            self.post("log", "Checking the ZAR's own checksum…", "info")
+            z = ZarArchive(job.path)
+            try:
+                if not z.hash_ok(lambda x: prog(x * 0.1), stop):
+                    raise UnpackError("the ZAR doesn't match its own checksum, so it is damaged; nothing was made from it")
+            finally:
+                z.close()
+        ents, read, close = self.xbox_source(job)
+        try:
+            span = 0.45 if verify else 0.9
+            build_xiso(ents, dest, read, lambda x: prog(0.1 + x * span), stop)
+            if verify:
+                self.post("log", "Reading the new disc image back against the source…", "info")
+                e2, r2, c2 = iso_source(dest)
+                try:
+                    if not entries_match((ents, read), (e2, r2), lambda x: prog(0.55 + x * 0.45), stop):
+                        raise UnpackError("the disc image that was built didn't match what it came from; it was discarded")
+                finally:
+                    c2()
+        finally:
+            close()
+        prog(1.0)
+
+    def xbox_to_zar(self, job, dest, prog, iso=None):
+        """An Xbox 360 XISO (job's own, or the one just made from a CHD), or a game folder -> a ZAR at dest."""
+        verify = self.verify_wanted()
+        stop = lambda: self.stop_flag  # noqa: E731
+        if iso is not None or self.xbox_job_is_iso(job):
+            iso = iso or job.path
+            if xbox_iso_kind(iso) != "360":
+                raise UnpackError("this isn't an Xbox 360 disc image (it has no default.xex at its top), so it can't become a ZAR")
+            ents, read, close = iso_source(iso)
+        else:
+            ents, read, close = self.xbox_source(job)
+        try:
+            write_zar(dest, ents, read, lambda x: prog(x * (0.7 if verify else 1.0)), stop)
+            if verify:
+                self.post("log", "Reading the new ZAR back against the source…", "info")
+                z = ZarArchive(dest)
+                try:
+                    if not z.hash_ok(lambda x: prog(0.7 + x * 0.05), stop) or \
+                            not entries_match((ents, read), (list(z.entries()), z.read), lambda x: prog(0.75 + x * 0.25), stop):
+                        raise UnpackError("the ZAR that was built didn't match what it came from; it was discarded")
+                finally:
+                    z.close()
+        finally:
+            close()
+        prog(1.0)
+
+    def xbox_job_is_iso(self, job):
+        return job.container not in ("zar", "xfolder")
+
+    def do_zar_to_iso(self, job, o):
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        self.post("log", f"\n{job.path.name}  [Xbox 360 → ISO]  (a rebuilt disc image, for emulators)", "info")
+        try:
+            self.xbox_to_xiso(job, part, self.cso_progress(job, "Building ISO"))
+            os.replace(part, out)
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_to_zar(self, job, o):
+        """An Xbox 360 ISO or game folder -> a ZAR (what Xenia reads)."""
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".zar"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        self.post("log", f"\n{job.path.name}  [Xbox 360 → ZAR]", "info")
+        try:
+            self.xbox_to_zar(job, part, self.cso_progress(job, "Making ZAR"))
+            os.replace(part, out)
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except (OSError, ValueError) as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def xbox_to_folder(self, job, dest, prog, iso=None):
+        """The files of an Xbox 360 ZAR or disc image -> loose files in the folder dest. With 'verify' on, what was written is
+        read back against the source."""
+        verify = self.verify_wanted()
+        stop = lambda: self.stop_flag  # noqa: E731
+        if iso is not None or self.xbox_job_is_iso(job):
+            iso = iso or job.path
+            if xbox_iso_kind(iso) not in ("360", "xbox"):
+                raise UnpackError("this isn't an Xbox disc image (it has no default.xex at its top), so it can't become a game folder")
+            ents, read, close = iso_source(iso)
+        else:
+            ents, read, close = self.xbox_source(job)
+        try:
+            root = Path(dest).resolve()
+            total = sum(sz for _p, f, _o, sz in ents if f) or 1
+            done = 0
+            for parts, is_file, src, size in ents:
+                target = root.joinpath(*[safe_file_name(x) for x in parts])
+                if root not in target.resolve().parents:
+                    raise UnpackError("a name in the archive points outside the folder it is being unpacked into; nothing was made")
+                if not is_file:
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "wb") as g:
+                    for piece in read(src, size):
+                        g.write(piece)
+                        done += len(piece)
+                        prog(done / total * (0.6 if verify else 1.0))
+                        if stop():
+                            raise UnpackError("stopped")
+            if verify:
+                self.post("log", "Reading the new folder back against the source…", "info")
+                e2, r2, c2 = folder_source(root)
+                try:
+                    if not entries_match((ents, read), (e2, r2), lambda x: prog(0.6 + x * 0.4), stop):
+                        raise UnpackError("the files that were written didn't match what they came from; they were discarded")
+                finally:
+                    c2()
+        finally:
+            close()
+        prog(1.0)
+
+    def folder_target(self, job, o):
+        """Where an unpacked game goes: a folder named like the source, next to it (or in the chosen output folder).
+        Returns (folder, skip); an existing one is skipped, replaced or numbered as 'If output exists' says."""
+        stem = self.output_path(job, o, ".x").stem
+        out = self.output_path(job, o, ".x").parent / stem
+        if out.exists() and any(out.iterdir()):
+            if o["exists"] == "Skip":
+                job.status, job.result = "Skipped (exists)", f"{out.name} already exists (see 'If output exists' in Settings)"
+                self.post("log", f"Skipped {job.path.name}: folder {out.name} already exists.", "warn")
+                return out, True
+            if o["exists"] == "Rename":
+                k = 1
+                while out.with_name(f"{stem} ({k})").exists():
+                    k += 1
+                out = out.with_name(f"{stem} ({k})")
+            else:
+                shutil.rmtree(out, ignore_errors=True)
+        return out, False
+
+    def folder_finish(self, job, out):
+        job.out_path = out
+        job.out_size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
+        job.status, job.result = "Done", f"→ {out.name}\\"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+
+    def do_to_folder(self, job, o):
+        """An Xbox 360 ZAR or ISO -> a game folder."""
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        created = not out.exists()
+        self.post("log", f"\n{job.path.name}  [Xbox 360 → game folder]", "info")
+        ok = False
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            self.xbox_to_folder(job, out, self.cso_progress(job, "Unpacking"))
+            ok = True
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            if not ok and created:
+                shutil.rmtree(out, ignore_errors=True)
+        if ok:
+            self.folder_finish(job, out)
+            if o["delete_src"]:
+                self.remove_sources(job, o)
+
+    def extract_to_folder(self, job, o):
+        """A DVD CHD of an Xbox disc -> a game folder (through a temporary ISO)."""
+        if job.disc != "DVD":
+            job.status, job.result = "Failed (not possible)", f"A game folder is only possible for an Xbox 360 DVD; this CHD holds a {job.disc} disc."
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        created = not out.exists()
+        tmp = out.parent / f".{out.name[:40]}.chdm_tmp"
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        ok = False
+        try:
+            iso = tmp / "t.iso"
+            cmd = [CHDMAN, "extractdvd", "-i", str(job.path), "-o", str(iso), "-f"]
+            self.post("log", f"\n{job.path.name}  [DVD CHD → game folder]", "info")
+            self.post("log", "$ " + " ".join(f'"{c}"' if " " in c else c for c in cmd), "cmd")
+            rc = self.run_proc(cmd, job, "Extracting")
+            if self.stop_flag or rc != 0:
+                job.status = "Stopped" if self.stop_flag else f"Failed (code {rc})"
+                return
+            out.mkdir(parents=True, exist_ok=True)
+            try:
+                self.xbox_to_folder(job, out, self.cso_progress(job, "Unpacking"), iso=iso)
+                ok = True
+            except UnpackError as e:
+                if self.stop_flag:
+                    job.status = "Stopped"
+                else:
+                    job.status, job.result = "Failed (can't unpack)", str(e)
+                    self.post("log", f"{job.path.name}: {e}", "err")
+            except OSError as e:
+                job.status, job.result = "Failed (disk)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if not ok and created:
+                shutil.rmtree(out, ignore_errors=True)
+        if ok:
+            self.folder_finish(job, out)
+
+    def extract_to_zar(self, job, o):
+        """A DVD CHD of an Xbox 360 disc -> a ZAR (through a temporary ISO)."""
+        if job.disc != "DVD":
+            job.status, job.result = "Failed (not possible)", f"A ZAR is only possible for an Xbox 360 DVD; this CHD holds a {job.disc} disc."
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".zar"), o)
+        if skip:
+            return
+        tmp = out.parent / f".{out.stem[:40]}.chdm_tmp"
+        part = out.with_name(out.name + ".part")
+        shutil.rmtree(tmp, ignore_errors=True)
+        tmp.mkdir(parents=True, exist_ok=True)
+        job.out_path = out
+        try:
+            iso = tmp / "t.iso"
+            cmd = [CHDMAN, "extractdvd", "-i", str(job.path), "-o", str(iso), "-f"]
+            self.post("log", f"\n{job.path.name}  [DVD CHD → ZAR]", "info")
+            self.post("log", "$ " + " ".join(f'"{c}"' if " " in c else c for c in cmd), "cmd")
+            rc = self.run_proc(cmd, job, "Extracting")
+            if self.stop_flag or rc != 0:
+                job.status = "Stopped" if self.stop_flag else f"Failed (code {rc})"
+                return
+            try:
+                self.xbox_to_zar(job, part, self.cso_progress(job, "Making ZAR"), iso=iso)
+            except UnpackError as e:
+                if self.stop_flag:
+                    job.status = "Stopped"
+                else:
+                    job.status, job.result = "Failed (can't build)", str(e)
+                    self.post("log", f"{job.path.name}: {e}", "err")
+                return
+            except OSError as e:
+                job.status, job.result = "Failed (disk)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+                return
+            os.replace(part, out)
+            job.out_size = out.stat().st_size
+            job.status, job.result = "Done", f"→ {out.name}"
+            self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
             part.unlink(missing_ok=True)
