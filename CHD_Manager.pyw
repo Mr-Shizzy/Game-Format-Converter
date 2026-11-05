@@ -309,6 +309,18 @@ def case_fixed_sheet(path):
     return out
 
 
+def sheet_refs(files):
+    """{lower-case path of a file a .cue/.gdi/.toc points to: that sheet's name}, for the sheets among files."""
+    out = {}
+    for f in files:
+        f = Path(f)
+        e = f.suffix.lower()
+        if e in (".cue", ".gdi", ".toc") and f.is_file():
+            for r in (parse_cue(f) if e == ".cue" else parse_gdi(f) if e == ".gdi" else parse_toc(f)):
+                out.setdefault(str(r).lower(), f.name)
+    return out
+
+
 def parse_cue(p):
     refs = []
     try:
@@ -5501,6 +5513,9 @@ class App:
         self._problems = []             # refusals collected while files are being added
         self.run_jobs = []              # the items of the run in progress
         self._busy_told = False
+        self.adding = False             # files are being read into the list right now
+        self._add_queue = []            # drops that arrive meanwhile wait here
+        self._close_when_done = False
         self.echo = None                # the command-line mode prints log lines through this
         self.no_save = False
         self.jobs = []
@@ -6486,7 +6501,7 @@ class App:
         """A click on a row's Action cell opens a drop-down with every choice that fits that item."""
         if self.tree.identify_region(e.x, e.y) != "cell" or self.tree.identify_column(e.x) != "#2" or e.state & 0x5:
             return
-        if self.running:
+        if self.running or self.adding:
             if not self._busy_told:                       # once per run, so clicking around never turns into a stream of windows
                 self._busy_told = True
                 self.busy_notice("changing what a file becomes")
@@ -6622,6 +6637,10 @@ class App:
             pass
 
     def on_close(self):
+        if self.adding:                                   # closing in the middle of reading files would tear the list apart: finish first
+            self._close_when_done = True
+            self.status.config(text="Closing as soon as the files have been added…")
+            return
         if self.running:
             if not self.ask("A job is running. Stop it and quit?"):
                 return
@@ -6747,6 +6766,37 @@ class App:
             messagebox.showwarning(APP_NAME, headline + "\n\n" + body[:1500])
 
     def add_paths(self, paths):
+        """Read files, folders and archives into the list. While that works the window shows how far it is and Start waits;
+        a second drop that arrives meanwhile is queued and handled right after the first."""
+        if self.adding:
+            self._add_queue.append(list(paths))
+            return
+        self.adding, self._busy_told = True, False
+        self.start_btn.config(state="disabled")
+        todo = [list(paths)]
+        try:
+            while todo:
+                self._add_batch(todo.pop(0))
+                todo += self._add_queue
+                self._add_queue = []
+        finally:
+            self.adding = False
+            if not self.running:
+                self.start_btn.config(state="normal")
+                self.cur_bar["value"] = 0
+            self.update_status_idle()
+        if self._close_when_done:
+            self.on_close()
+
+    def add_progress(self, done, total, text):
+        """The status line and the big bar while files are being read (the bars belong to the conversion once one runs)."""
+        if self.running:
+            return
+        self.status.config(text=text)
+        self.cur_bar["value"] = 100 * done / max(1, total)
+        self.root.update()
+
+    def _add_batch(self, paths):
         self._problems = []
         added = 0
         try:
@@ -6763,8 +6813,11 @@ class App:
 
     def _add_paths(self, paths):
         found = []   # (path, root)
+        picked = sheet_refs(p for p in map(Path, paths) if not p.is_dir())      # what the .cue/.gdi/.toc files picked here point to
+        self.add_progress(0, 1, "Looking at what you added…")
         for p in map(Path, paths):
             if p.is_dir():
+                self.add_progress(0, 1, f"Looking through {p.name}…")
                 files, ignored = self.scan_folder(p)
                 found += [(f, p) for f in files]
                 if not files and not ignored:
@@ -6773,6 +6826,8 @@ class App:
                     self.refuse(p.name, sentence(f"{sum(ignored.values())} {', '.join(sorted(ignored))} file(s) were left out: an .mdf is only the data half "
                                                  "of a disc image, and it needs its .mds file next to it"), "warn",
                                 f"Ignored {sum(ignored.values())} file(s) ({', '.join(sorted(ignored))}): keep an .mdf next to its .mds.")
+            elif p.suffix.lower() not in (".cue", ".gdi", ".toc") and str(p).lower() in picked:
+                self.log(f"{p.name} belongs to {picked[str(p).lower()]}, so it is not added on its own.", "info")
             elif p.suffix.lower() in ARCHIVE_EXTS:
                 found.append((p, None))
             elif p.suffix.lower() in SRC_EXTS | {".chd"}:
@@ -6780,6 +6835,12 @@ class App:
             else:
                 self.refuse(p.name, sentence(f"CHD Manager doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
                             f"Skipped (unsupported type): {p.name}")
+        refs = sheet_refs(f for f, _r in found)          # a disc file that a sheet in this batch already covers is part of that sheet
+        mine = [(f, r) for f, r in found if f.suffix.lower() in (".cue", ".gdi", ".toc") or str(f).lower() not in refs]
+        for f, _r in found:
+            if (f, _r) not in mine:
+                self.log(f"{f.name} belongs to {refs[str(f).lower()]}, so it is not added on its own.", "info")
+        found = mine
         jobs_from = []   # (file, root, archive, folder it was unpacked into)
         known = {str(j.archive).lower() for j in self.jobs if j.archive}
         for f, root in found:
@@ -6795,7 +6856,8 @@ class App:
         listed = set(have)
         was_empty = not self.jobs
         added = 0
-        for f, root, arc, tmp in jobs_from:
+        for idx, (f, root, arc, tmp) in enumerate(jobs_from):
+            self.add_progress(idx, len(jobs_from), f"Adding {idx + 1} of {len(jobs_from)}: {f.name}")
             if str(f).lower() in have:
                 if str(f).lower() in listed:                # a .cue and its .bin picked together are one item: only a real repeat is worth saying
                     self.refuse(f.name, self.DUP_ITEM, "info")
@@ -6818,6 +6880,7 @@ class App:
                 self.refuse(job.path.name, sentence("it was added, but it won't convert: the files it points to weren't found next to it ("
                                                    + ", ".join(job.missing) + ")"), "warn",
                             f"{job.path.name}: missing referenced file(s): {', '.join(job.missing)}")
+        self.add_progress(len(jobs_from), len(jobs_from), "Finishing up…")
         self.refresh_empty()
         self.log(f"Added {added} item(s).", "info")
         self.update_action_labels()
@@ -6838,10 +6901,13 @@ class App:
         return [self.tree_ids[i] for i in self.tree.selection() if i in self.tree_ids]
 
     def busy_notice(self, what):
-        self.notify(f"A conversion is running, so {what} has to wait. Let it finish, or press Stop first.")
+        if self.adding:
+            self.notify(f"Files are still being added, so {what} has to wait a moment. The bar at the bottom shows how far it is.")
+        else:
+            self.notify(f"A conversion is running, so {what} has to wait. Let it finish, or press Stop first.")
 
     def remove_selected(self):
-        if self.running:
+        if self.running or self.adding:
             self.busy_notice("removing files")
             return
         for iid in self.tree.selection():
@@ -6858,7 +6924,7 @@ class App:
         self.root.after_idle(self.autofit_columns)
 
     def clear_all(self):
-        if self.running:
+        if self.running or self.adding:
             self.busy_notice("clearing the list")
             return
         self.tree.delete(*self.tree.get_children())
@@ -7200,6 +7266,9 @@ class App:
     def handle_external(self, paths, start=False, to=None):
         """Files from the right-click menu (or dropped on the program): add them, set the format if one was asked for,
         and start once nothing more has arrived for a moment, so a whole selection becomes one batch in one window."""
+        if self.adding:
+            self.root.after(300, lambda: self.handle_external(paths, start, to))
+            return
         before = {id(j) for j in self.jobs}
         self.add_paths(paths)
         new = [j for j in self.jobs if id(j) not in before]
@@ -7226,7 +7295,7 @@ class App:
     def tick_start(self):
         if not self.pending_start:
             return
-        if self.running or time.time() < self.start_due:
+        if self.running or self.adding or time.time() < self.start_due:
             self.root.after(500, self.tick_start)
             return
         todo = [j for j in self.pending_start if not j.status.startswith("Done")]
@@ -7236,6 +7305,9 @@ class App:
 
     def start(self, only=None):
         if self.running:
+            return
+        if self.adding:
+            self.notify("Files are still being added. Wait for the bar at the bottom to finish, then press Start.")
             return
         if not CHDMAN:
             self.notify("chdman was not found, so nothing can be converted. Set it in Settings, Output page.", error=True)
