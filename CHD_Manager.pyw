@@ -4223,7 +4223,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (Switch, experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
