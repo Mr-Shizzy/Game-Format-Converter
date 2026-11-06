@@ -4568,7 +4568,7 @@ class Job:
         if p.is_dir() and nup_bundle(p) is not None:           # a decrypted Switch game (exefs/romfs, with its updates and extra content): can become a NUP
             pkgs = nup_bundle(p)
             tree = [t for x in pkgs for t in nup_tree(x["root"])]
-            self.container, self.platform, self.types = "swfolder", nup_folder_console(pkgs) or "Switch", ["MODE1"]
+            self.container, self.platform, self.types = "swfolder", nup_folder_console(pkgs) or "Switch / Switch 2", ["MODE1"]
             self.zar_raw = sum(t[2] for t in tree)
             self.size, self.src_files = self.zar_raw, [p]
             u, d = sum(1 for x in pkgs if x["kind"] == 1), sum(1 for x in pkgs if x["kind"] == 2)
@@ -4582,7 +4582,7 @@ class Job:
             except UnpackError as e:
                 raise ValueError(str(e)) from None
             close()
-            self.container, self.platform, self.types = "nup", nup_file_console(p) or "Switch 2", ["MODE1"]     # the NUP header itself doesn't say; its main.npdm does (when it can't tell, these are in practice Switch 2)
+            self.container, self.platform, self.types = "nup", nup_file_console(p) or "Switch / Switch 2", ["MODE1"]     # the NUP header itself doesn't say; its main.npdm does
             self.zar_raw = sum(x["size"] for x in nfiles)
             self.size, self.src_files = p.stat().st_size, [p]
             self.auto_type = "DVD"
