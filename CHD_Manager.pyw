@@ -6701,6 +6701,7 @@ def build_nsp(files, dest, prog=None, stopped=lambda: False):
 # folders (and optionally an update and extra content), each file stored raw or as one zstd frame, with a SHA-256 of every file and of the table.
 # It uses no keys and does no decrypting. Nothing here has been tried in an emulator by the author.
 NUP_KINDS = {0: "game", 1: "update", 2: "extra content"}
+NUP_RAW_OVER = 256 * 1024 * 1024                  # files bigger than this are not compressed (the NSP-Box tool does the same by default)
 
 
 def nup_folder_ok(p):
@@ -6854,6 +6855,9 @@ def nup_resolve(pkgs, folder):
             x["tid"] = btid
         elif x["kind"] == 1:
             own = nup_npdm_id(x["root"])
+            if own and btid and own != btid and (own & ~0xFFF) != (btid & ~0xFFF):      # an update for some other game was dropped in with this one
+                return (f"the update in {Path(x['root']).name} is for a different game (id {own:016X}) than the game it sits with (id {btid:016X}); "
+                        "put it in a folder of its own")
             x["tid"] = own or btid
     if any(x["tid"] is None for x in pkgs):
         return ("it can't tell which game this is; put the game's 16-digit title id in square brackets in the folder's name, "
@@ -6937,7 +6941,8 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
                 continue
             start = out.tell()
             h = hashlib.sha256()
-            co = cctx.compressobj(size=size)
+            raw_only = size > NUP_RAW_OVER                  # big files are stored as they are: Eglantine unpacks big compressed ones into a temp folder it may not have made
+            co = None if raw_only else cctx.compressobj(size=size)
             with open(fp, "rb") as f:
                 while True:
                     if stopped():
@@ -6946,14 +6951,15 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
                     if not b:
                         break
                     h.update(b)
-                    out.write(co.compress(b))
+                    out.write(b if raw_only else co.compress(b))
                     done += len(b)
                     if prog:
                         prog(done / total)
-            out.write(co.flush())
+            if co is not None:
+                out.write(co.flush())
             csize = out.tell() - start
-            codec = 1
-            if csize >= size:                                # no gain: store it as it is
+            codec = 0 if raw_only else 1
+            if not raw_only and csize >= size:                                # no gain: store it as it is
                 out.seek(start)
                 out.truncate()
                 with open(fp, "rb") as f:
@@ -11314,7 +11320,13 @@ class App:
             job.status, job.result = "Failed (can't build)", err
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
-        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup"), o)
+        stem = job.path.name                                 # named like the folder, plus what the files say: the game's id and the newest update's version
+        if not re.search(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", stem):
+            stem += f" [{next((x for x in pkgs if x['kind'] == 0), pkgs[0])['tid']:016X}]"
+        top = max((x["version"] for x in pkgs if x["kind"] == 1), default=None)
+        if top is not None and not re.search(r"\[v\d+\]", stem):
+            stem += f"[v{top}]"
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup").with_name(stem + ".nup"), o)
         if skip:
             return
         part = out.with_name(out.name + ".part")
