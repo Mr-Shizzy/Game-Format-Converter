@@ -8198,10 +8198,10 @@ class App:
         cols = ("file", "action", "platform", "type", "size", "status", "result", "folder")
         self.tree = ttk.Treeview(top, columns=cols, displaycolumns=("file", "action", "platform", "type", "size", "status", "result"),
                                  show="headings", selectmode="extended")
-        for c, t, w, a in (("file", "File", 240, "w"), ("action", "Action  ▾", 150, "w"), ("platform", "Platform", 100, "w"),
-                           ("type", "Disc type", 90, "w"), ("size", "Size", 90, "e"), ("status", "Status", 150, "w"),
+        for c, t, w, a in (("file", "File", 240, "w"), ("action", "Action  ▾", 150, "w"), ("platform", "Platform", 100, "center"),
+                           ("type", "Disc type", 90, "center"), ("size", "Size", 90, "center"), ("status", "Status", 150, "center"),
                            ("result", "Result", 230, "w"), ("folder", "Folder", 300, "w")):
-            self.tree.heading(c, text=t)
+            self.tree.heading(c, text=t, anchor=a)                  # a heading sits the same way its column's text does
             self.tree.column(c, width=w, anchor=a, stretch=(c in ("file", "status", "result", "folder")))
         ys = ttk.Scrollbar(top, orient="vertical", command=self.tree.yview)
         xs = ttk.Scrollbar(top, orient="horizontal", command=self.tree.xview)
