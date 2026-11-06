@@ -46,7 +46,7 @@ SETTINGS_FILE = HERE / "chd_manager_settings.json"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -4218,7 +4218,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4261,7 +4261,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
 SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
 
@@ -4311,6 +4311,7 @@ class Job:
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
+        self.nsps = []                 # a Switch package (container 'swnsp'): its info, with the game's updates and extra content added to it
         self.pkgs = []                 # a PS3 package (container 'ps3pkg'): its header info, with the game's other packages (updates) added to it
         self.split_stem = ""           # a PS3 image kept in pieces (container 'ps3parts'): its name without '.iso' and the piece number
         self.ps3_info = {}             # its game ID, title, region and whether its protected parts are still encrypted
@@ -4392,6 +4393,10 @@ class Job:
             return [("pkg", target_label("pkg"))]
         if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
             return [("folder", target_label("folder"))]
+        if self.container == "swnsp":               # Switch packages (a game, its newest update, extra content): one cartridge image
+            return [("xci", target_label("xci"))]
+        if self.container == "swxci":               # a Switch cartridge image: a package of its files
+            return [("nsp", target_label("nsp"))]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
         if self.ps3:                                # a PS3 disc image: a CHD of it, or its files (not while they are still encrypted)
@@ -4524,6 +4529,23 @@ class Job:
             if info["encrypted"]:
                 self.warn = ("this PS3 disc image is still encrypted, so its files can't be unpacked until it has been decrypted with your own "
                              "disc key. It can still be joined into one ISO, or become a CHD, which store it exactly as it is")
+            return
+        if ext in (".nsp", ".xci") and not p.is_dir():
+            if ext == ".xci":
+                files = xci_files(p)
+                self.container, self.platform, self.types = "swxci", "Switch", ["MODE1"]
+                self.size, self.src_files = p.stat().st_size, [p]
+                self.auto_type, self.reason = "DVD", f"Switch cartridge image ({len(files)} files)"
+                return
+            info = nsp_info(p, SWITCH_KEYS[0])
+            self.container, self.platform, self.types = "swnsp", "Switch", ["MODE1"]
+            self.nsps = [info]
+            self.size, self.src_files = info["size"], [p]
+            self.auto_type = "DVD"
+            self.reason = {"base": "Switch game", "update": "Switch update", "dlc": "Switch extra content"}.get(info["kind"], "Switch package")
+            if info["ticketed"] and not SWITCH_KEYS[0]:
+                self.warn = ("it needs your own keys to be converted to an XCI, and none are set up yet "
+                             "(Settings, Formats, Nintendo Switch: choose your prod.keys file or paste it in)")
             return
         if ext == ".pkg" and not p.is_dir():
             info = pkg_info(p)
@@ -4717,8 +4739,22 @@ class Job:
         self.reason = "PS3 game package" + (" with " + " and ".join(extra) if extra else "")
         self._raw = None
 
+    def add_nsp(self, other):
+        """Another Switch package for the same game (its update or extra content, or the game itself) joins this item."""
+        self.nsps += other.nsps
+        self.nsps.sort(key=lambda i: ({"base": 0, "": 0, "update": 1, "dlc": 2}.get(i["kind"], 0), i["tid"], i["version"], i["path"].name))
+        self.src_files = [i["path"] for i in self.nsps]
+        base = next((i for i in self.nsps if i["kind"] in ("base", "")), None)
+        if base is not None:
+            self.path = self.home = base["path"]
+        self.size = sum(i["size"] for i in self.nsps)
+        ups, dlcs = sum(1 for i in self.nsps if i["kind"] == "update"), sum(1 for i in self.nsps if i["kind"] == "dlc")
+        extra = ([f"{ups} update{'s' if ups != 1 else ''}"] if ups else []) + ([f"{dlcs} extra content"] if dlcs else [])
+        self.reason = "Switch game" + (" with " + " and ".join(extra) if extra else "")
+        self._raw = None
+
     def row(self):
-        name = self.path.name + (f"  (+{len(self.src_files) - 1} more)" if self.container in ("ps3parts", "ps3pkg") and len(self.src_files) > 1 else "")
+        name = self.path.name + (f"  (+{len(self.src_files) - 1} more)" if self.container in ("ps3parts", "ps3pkg", "swnsp") and len(self.src_files) > 1 else "")
         return (name, self.action_label(), self.platform, self.type_label(),
                 fmt_size(self.size), self.status, self.result, str(self.path.parent))
 
@@ -5741,13 +5777,14 @@ def parse_hex_key(data):
     return bytes.fromhex(text) if re.fullmatch(r"[0-9a-fA-F]{32}", text) else None
 
 
-def aes_ecb(key):
-    """-> a function that AES-128-ECB encrypts data (a multiple of 16 bytes, no padding), made with what this computer already has
+def aes_ecb(key, decrypt=False):
+    """-> a function that AES-128-ECB encrypts (or, with decrypt=True, decrypts) data (a multiple of 16 bytes, no padding), made with what this computer already has
     (the 'cryptography' package if installed, Windows' own bcrypt, or the system's OpenSSL). Nothing is bundled."""
     import ctypes
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        return Cipher(algorithms.AES(key), modes.ECB()).encryptor().update
+        c = Cipher(algorithms.AES(key), modes.ECB())
+        return (c.decryptor() if decrypt else c.encryptor()).update
     except Exception:  # noqa: BLE001
         pass
     if os.name == "nt":
@@ -5761,7 +5798,7 @@ def aes_ecb(key):
 
         def enc_nt(data):
             out, got = ctypes.create_string_buffer(len(data)), ctypes.c_ulong(0)
-            if bc.BCryptEncrypt(hk, bytes(data), len(data), None, None, 0, out, len(data), ctypes.byref(got), 0):
+            if (bc.BCryptDecrypt if decrypt else bc.BCryptEncrypt)(hk, bytes(data), len(data), None, None, 0, out, len(data), ctypes.byref(got), 0):
                 raise UnpackError("Windows' own encryption code (bcrypt) failed")
             return out.raw[:got.value]
         return enc_nt
@@ -5773,13 +5810,13 @@ def aes_ecb(key):
     lib.EVP_CIPHER_CTX_new.restype = ctypes.c_void_p
     lib.EVP_aes_128_ecb.restype = ctypes.c_void_p
     ctx = ctypes.c_void_p(lib.EVP_CIPHER_CTX_new())
-    if not lib.EVP_EncryptInit_ex(ctx, ctypes.c_void_p(lib.EVP_aes_128_ecb()), None, bytes(key), None):
+    if not (lib.EVP_DecryptInit_ex if decrypt else lib.EVP_EncryptInit_ex)(ctx, ctypes.c_void_p(lib.EVP_aes_128_ecb()), None, bytes(key), None):
         raise UnpackError("the system's OpenSSL didn't start, so the package can't be opened here")
     lib.EVP_CIPHER_CTX_set_padding(ctx, 0)
 
     def enc_ssl(data):
         out, n = ctypes.create_string_buffer(len(data) + 16), ctypes.c_int(0)
-        if not lib.EVP_EncryptUpdate(ctx, out, ctypes.byref(n), bytes(data), len(data)):
+        if not (lib.EVP_DecryptUpdate if decrypt else lib.EVP_EncryptUpdate)(ctx, out, ctypes.byref(n), bytes(data), len(data)):
             raise UnpackError("the system's OpenSSL failed")
         return out.raw[:n.value]
     return enc_ssl
@@ -5976,6 +6013,512 @@ def rpcs3_workdir(exe, work):
             except OSError:
                 shutil.copy2(f, dst)
     return work / "rpcs3.exe"
+
+
+# ---- Nintendo Switch: NSP <-> XCI (the user's own keys; none are shipped)
+SWITCH_KEYS = [None]                           # {name: bytes} from the user's own prod.keys, only the few names this needs
+SW_KEY_RE = re.compile(r"(header_key|aes_kek_generation_source|aes_key_generation_source|titlekek_source|xci_header_key|"
+                       r"key_area_key_(?:application|ocean|system)_source|master_key_[0-9a-f]{2})")
+SW_KEY_LEN = {"header_key": 32}
+NCA_HEAD = 0xC00
+SW_SIG_BODY = {0x10000: 0x240, 0x10001: 0x140, 0x10002: 0x80, 0x10003: 0x240, 0x10004: 0x140, 0x10005: 0x80}
+
+
+class SwitchKeyError(UnpackError):
+    """The keys given are missing something, or don't open this game."""
+
+
+def parse_switch_keys(data):
+    """The text of a prod.keys file (or the part of it the person copied) -> {name: bytes} of just the keys this program uses, or None."""
+    text = data.decode("utf-8", "ignore") if isinstance(data, (bytes, bytearray)) else str(data)
+    keys = {}
+    for line in text.splitlines():
+        m = re.match(r"\s*([A-Za-z0-9_]+)\s*[=:]\s*([0-9A-Fa-f]+)\s*$", line)
+        if not m:
+            continue
+        name, val = m.group(1).lower(), m.group(2)
+        if SW_KEY_RE.fullmatch(name) and len(val) == 2 * SW_KEY_LEN.get(name, 16):
+            keys[name] = bytes.fromhex(val)
+    return keys or None
+
+
+def switch_keys_text(keys):
+    """The keys as the 'name=hex' lines that are kept in the settings file."""
+    return "\n".join(f"{k}={v.hex()}" for k, v in sorted(keys.items())) if keys else ""
+
+
+def sw_need(keys, *names):
+    miss = [n for n in names if not keys or n not in keys]
+    if miss:
+        raise SwitchKeyError("your keys are missing " + ", ".join(miss[:4]) + (" and more" if len(miss) > 4 else "") +
+                             ". Use a prod.keys that is complete and recent enough for this game")
+
+
+def sw_xts(key32, data, sector0=0, decrypt=True):
+    """AES-128-XTS as the Switch does it (sectors of 0x200, the sector number counted big-endian)."""
+    k1, k2 = key32[:16], key32[16:]
+    e2, ek = aes_ecb(k2), aes_ecb(k1, decrypt)
+    mask, out = (1 << 128) - 1, bytearray()
+    for s in range(len(data) // 0x200):
+        t = int.from_bytes(e2((sector0 + s).to_bytes(16, "big")), "little")
+        tw = bytearray(0x200)
+        for j in range(32):
+            tw[16 * j:16 * j + 16] = t.to_bytes(16, "little")
+            t = ((t << 1) & mask) ^ (0x87 if t >> 127 else 0)
+        out += _xor(ek(_xor(data[0x200 * s:0x200 * s + 0x200], bytes(tw))), bytes(tw))
+    return bytes(out)
+
+
+def sw_cbc_encrypt(key, iv, data):
+    enc, prev, out = aes_ecb(key), iv, bytearray()
+    for i in range(0, len(data), 16):
+        prev = enc(_xor(data[i:i + 16], prev))
+        out += prev
+    return bytes(out)
+
+
+def sw_master(keys, index):
+    return keys.get(f"master_key_{index:02x}")
+
+
+def sw_title_kek(keys, rev):
+    sw_need(keys, f"master_key_{rev:02x}", "titlekek_source")
+    return aes_ecb(sw_master(keys, rev), True)(keys["titlekek_source"])
+
+
+def sw_area_key(keys, gen, slot):
+    """The key an NCA's key area is locked with: generation (from its header), and which of the three families (0 application, 1 ocean, 2 system)."""
+    idx = max(gen - 1, 0)
+    name = ("key_area_key_application_source", "key_area_key_ocean_source", "key_area_key_system_source")[slot if slot < 3 else 0]
+    sw_need(keys, f"master_key_{idx:02x}", "aes_kek_generation_source", "aes_key_generation_source", name)
+    kek = aes_ecb(sw_master(keys, idx), True)(keys["aes_kek_generation_source"])
+    return aes_ecb(aes_ecb(kek, True)(keys[name]), True)(keys["aes_key_generation_source"])
+
+
+def pfs0_list(f, base=0):
+    """[(name, offset in file, size)] of a PFS0 (an NSP is one) that starts at `base`."""
+    f.seek(base)
+    head = f.read(16)
+    if len(head) < 16 or head[:4] != b"PFS0":
+        raise ValueError("isn't a Switch package (no PFS0 header)")
+    n, strsz = struct.unpack("<II", head[4:12])
+    if not 0 < n < 100000 or strsz > 1 << 24:
+        raise ValueError("has a damaged file list")
+    ents = f.read(24 * n)
+    strs = f.read(strsz)
+    if len(ents) < 24 * n or len(strs) < strsz:
+        raise ValueError("is cut short")
+    data0 = base + 16 + 24 * n + strsz
+    out = []
+    for i in range(n):
+        off, size, so, _r = struct.unpack("<QQII", ents[24 * i:24 * i + 24])
+        end = strs.find(b"\0", so)
+        out.append((strs[so:end if end >= 0 else None].decode("utf-8", "replace"), data0 + off, size))
+    return out
+
+
+def hfs0_list(f, base=0):
+    """[(name, offset in file, size, hashed size)] of an HFS0 that starts at `base`."""
+    f.seek(base)
+    head = f.read(16)
+    if len(head) < 16 or head[:4] != b"HFS0":
+        raise ValueError("isn't a Switch cartridge image (no HFS0 header)")
+    n, strsz = struct.unpack("<II", head[4:12])
+    if not 0 <= n < 100000 or strsz > 1 << 24:
+        raise ValueError("has a damaged file list")
+    ents = f.read(64 * n)
+    strs = f.read(strsz)
+    if len(ents) < 64 * n or len(strs) < strsz:
+        raise ValueError("is cut short")
+    data0 = base + 16 + 64 * n + strsz
+    out = []
+    for i in range(n):
+        off, size, so, hs = struct.unpack("<QQII", ents[64 * i:64 * i + 24])
+        end = strs.find(b"\0", so)
+        out.append((strs[so:end if end >= 0 else None].decode("utf-8", "replace"), data0 + off, size, hs))
+    return out
+
+
+def xci_files(path):
+    """[(name, offset, size)] of the files in the 'secure' part of an XCI (the game's own files), found from its header."""
+    with open(path, "rb") as f:
+        head = f.read(0x200)
+        if len(head) < 0x200 or head[0x100:0x104] != b"HEAD":
+            raise ValueError("isn't a Switch cartridge image (no HEAD mark)")
+        root = struct.unpack("<Q", head[0x130:0x138])[0]
+        if root < 0x200 or root > 0x100000:
+            raise ValueError("has a damaged header")
+        for name, off, size, _h in hfs0_list(f, root):
+            if name == "secure":
+                return [(n, o, s) for n, o, s, _ in hfs0_list(f, off)]
+    raise ValueError("has no 'secure' part, so there is no game in it")
+
+
+def sw_tik(data):
+    """A ticket -> (rights id, title key (encrypted), master key revision, type). Raises for a ticket tied to one console."""
+    if len(data) < 0x170:
+        raise ValueError("a ticket is cut short")
+    st = struct.unpack("<I", data[:4])[0]
+    b = SW_SIG_BODY.get(st)
+    if b is None or len(data) < b + 0x170:
+        raise ValueError("a ticket is in a form this program doesn't know")
+    if data[b + 0x141] != 0:
+        raise SwitchKeyError("this game's ticket belongs to one particular console (it is a personalised ticket), so its key can't be opened here")
+    return bytes(data[b + 0x160:b + 0x170]), bytes(data[b + 0x40:b + 0x50]), data[b + 0x145], data[b + 0x141]
+
+
+def sw_nca_head(f, off, keys):
+    """An NCA's header opened with the user's header key -> a dict, and the decrypted 0xC00 bytes."""
+    f.seek(off)
+    raw = f.read(NCA_HEAD)
+    if len(raw) < NCA_HEAD:
+        raise ValueError("an NCA file is cut short")
+    sw_need(keys, "header_key")
+    h = sw_xts(keys["header_key"], raw)
+    if h[0x200:0x204] not in (b"NCA3", b"NCA2"):
+        raise SwitchKeyError("that header key doesn't open this game (its files came out as nonsense). Check the keys are complete and recent enough")
+    gen = max(h[0x206], h[0x220])
+    return {"dist": h[0x204], "ctype": h[0x205], "gen": gen, "slot": h[0x207], "size": struct.unpack("<Q", h[0x208:0x210])[0],
+            "tid": struct.unpack("<Q", h[0x210:0x218])[0], "rights": bytes(h[0x230:0x240]), "titlekey": any(h[0x230:0x240])}, h
+
+
+def sw_section_read(f, nca_off, h, idx, key, rel, n):
+    """n bytes at `rel` inside section `idx` of an NCA, opened with the section's AES-CTR key (None if it isn't an AES-CTR section)."""
+    start = struct.unpack("<I", h[0x240 + 0x10 * idx:0x244 + 0x10 * idx])[0] * 0x200
+    fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    if fs[4] != 3 or not start:
+        return None
+    ab = start + rel
+    f.seek(nca_off + ab)
+    raw = f.read(n)
+    iv = bytes(fs[0x140:0x148][::-1]) + bytes(8)
+    return _xor(raw, ctr_keystream(aes_ecb(key), iv, ab, len(raw)))
+
+
+def sw_pfs0_start(h, idx):
+    """Where the PFS0 inside a section starts (relative to the section), or None."""
+    fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    if fs[2] != 1 or fs[3] != 2:
+        return None
+    layers = struct.unpack("<I", fs[0x2C:0x30])[0]
+    if not 2 <= layers <= 6:
+        return None
+    return struct.unpack("<Q", fs[0x30 + 16 * (layers - 1):0x38 + 16 * (layers - 1)])[0]
+
+
+def sw_check_key(f, off, h, key):
+    """True/False if the content key opens a PFS0 section of this NCA (its first bytes should read 'PFS0'); None if no section can be tested."""
+    for idx in range(4):
+        st = sw_pfs0_start(h, idx)
+        if st is None:
+            continue
+        got = sw_section_read(f, off, h, idx, key, st, 4)
+        if got is not None:
+            return got == b"PFS0"
+    return None
+
+
+def sw_content_key(f, off, hd, h, keys, tiks):
+    """The AES key that opens this NCA's data: the title key from its ticket, or the key from its own key area."""
+    if hd["titlekey"]:
+        t = tiks.get(hd["rights"])
+        if t is None:
+            raise SwitchKeyError("a file in this game needs a ticket that isn't in the package")
+        rid, enc, rev, _ty = t
+        return aes_ecb(sw_title_kek(keys, rev), True)(enc)
+    return aes_ecb(sw_area_key(keys, hd["gen"], hd["slot"]), True)(h[0x300:0x340])[0x20:0x30]
+
+
+def sw_meta(f, off, h, hd, key):
+    """(title id, version, type) from the cnmt inside a meta NCA, or None."""
+    for idx in range(4):
+        st = sw_pfs0_start(h, idx)
+        if st is None:
+            continue
+        head = sw_section_read(f, off, h, idx, key, st, 0x10)
+        if not head or head[:4] != b"PFS0":
+            continue
+        n, strsz = struct.unpack("<II", head[4:12])
+        if not 0 < n < 64 or strsz > 0x1000:
+            return None
+        body = sw_section_read(f, off, h, idx, key, st + 16, 24 * n + strsz)
+        for i in range(n):
+            o, sz, so, _r = struct.unpack("<QQII", body[24 * i:24 * i + 24])
+            nm = body[24 * n + so:].split(b"\0", 1)[0]
+            if nm.endswith(b".cnmt") and sz >= 0x20:
+                c = sw_section_read(f, off, h, idx, key, st + 16 + 24 * n + strsz + o, 0x20)
+                return struct.unpack("<Q", c[:8])[0], struct.unpack("<I", c[8:12])[0], c[12]
+    return None
+
+
+def nsp_info(path, keys=None):
+    """What is in an NSP. Without keys that's its files; with them also what it is (the game, an update or extra content), its version and
+    whether it needs the keys to convert. -> dict (raises ValueError with a plain reason)."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        try:
+            files = pfs0_list(f)
+        except ValueError as e:
+            raise ValueError(f"this {e}") from None
+        ncas = [x for x in files if x[0].lower().endswith(".nca")]
+        if not ncas:
+            raise ValueError("this package has no game files in it (no .nca files)")
+        tiks = {}
+        for nm, o, sz in files:
+            if nm.lower().endswith(".tik") and sz < 0x1000:
+                f.seek(o)
+                try:
+                    t = sw_tik(f.read(sz))
+                    tiks[t[0]] = t
+                except SwitchKeyError:
+                    tiks[None] = None
+                except ValueError:
+                    pass
+        info = {"path": path, "size": path.stat().st_size, "files": files, "ncas": ncas, "tiks": tiks, "ticketed": bool(tiks),
+                "kind": "", "tid": 0, "base": 0, "version": 0, "title_keys": {}}
+        m = re.search(r"\[v(\d+)\]", path.name)
+        if m:
+            info["version"] = int(m.group(1))
+        if keys and "header_key" in keys:
+            for nm, o, sz in ncas:
+                try:
+                    hd, h = sw_nca_head(f, o, keys)
+                except (SwitchKeyError, ValueError):
+                    continue
+                if hd["ctype"] == 1:                    # the meta NCA says which title this is
+                    tid = hd["tid"]
+                    low = tid & 0xFFF
+                    info["tid"] = tid
+                    info["kind"] = "base" if low == 0 else "update" if low == 0x800 else "dlc"
+                    info["base"] = tid if low == 0 else (tid & ~0xFFF) if low == 0x800 else ((tid >> 12) - 1) << 12
+                    try:
+                        key = sw_content_key(f, o, hd, h, keys, tiks)
+                        mt = sw_meta(f, o, h, hd, key)
+                    except (SwitchKeyError, ValueError, struct.error):
+                        mt = None
+                    if mt and mt[0] == tid and mt[1] > info["version"]:
+                        info["version"] = mt[1]
+                    break
+    return info
+
+
+def sw_plan(nsps, keys, latest_only=True):
+    """The NCA files that go into an XCI from NSP infos (game first, then update, then extra content) ->
+    [(nsp path, name, offset, size, rewrite)] where rewrite is None (copied as it is) or (new 0xC00 header bytes). Raises SwitchKeyError."""
+    order = {"base": 0, "": 0, "update": 1, "dlc": 2}
+    use = sorted(nsps, key=lambda i: (order.get(i["kind"], 0), i["tid"], i["version"]))
+    if latest_only:                                           # a Switch update is a patch against the game, so only the newest of each is needed
+        keep = {}
+        for i in use:
+            keep[(i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)] = i
+        use = [i for i in use if keep.get((i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)) is i]
+    plan, seen = [], set()
+    for i in use:
+        with open(i["path"], "rb") as f:
+            for nm, o, sz in i["ncas"]:
+                if nm in seen:
+                    continue
+                seen.add(nm)
+                new = None
+                if i["ticketed"]:
+                    sw_need(keys, "header_key")
+                    hd, h = sw_nca_head(f, o, keys)
+                    if hd["titlekey"]:
+                        t = i["tiks"].get(hd["rights"])
+                        if t is None:
+                            raise SwitchKeyError(f"{nm} needs a ticket that {i['path'].name} doesn't hold")
+                        tk = aes_ecb(sw_title_kek(keys, t[2]), True)(t[1])
+                        ok = sw_check_key(f, o, h, tk)
+                        if ok is False:
+                            raise SwitchKeyError("the title key from the ticket doesn't open the game's data, so these keys don't match this game")
+                        hb = bytearray(h)
+                        hb[0x230:0x240] = bytes(16)
+                        hb[0x300:0x340] = aes_ecb(sw_area_key(keys, hd["gen"], hd["slot"]))(tk * 4)
+                        new = sw_xts(keys["header_key"], bytes(hb), decrypt=False)
+                plan.append((i["path"], nm, o, sz, new))
+    return plan
+
+
+def _digest(f, off, n, stopped, skip=0):
+    import hashlib
+    h = hashlib.sha256()
+    f.seek(off + skip)
+    left = n - skip
+    while left > 0:
+        if stopped():
+            raise UnpackError("stopped")
+        b = f.read(min(1 << 22, left))
+        if not b:
+            raise UnpackError("a file is cut short")
+        h.update(b)
+        left -= len(b)
+    return h.digest()
+
+
+def xci_verify(path, plan, prog, stopped):
+    """Reads a finished XCI back: the same files, and the same data after each rewritten header (or the whole file where it wasn't rewritten)."""
+    got = {n: (o, s) for n, o, s in xci_files(path)}
+    if len(got) != len(plan) or any(r[1] not in got or got[r[1]][1] != r[3] for r in plan):
+        raise UnpackError("the XCI that was built doesn't list the same files as the packages; it was discarded")
+    total, done = max(1, sum(r[3] for r in plan)), 0
+    with open(path, "rb") as x:
+        for src, nm, off, size, new in plan:
+            skip = len(new) if new else 0
+            with open(src, "rb") as f:
+                same = _digest(f, off, size, stopped, skip) == _digest(x, got[nm][0], size, stopped, skip)
+                if new:
+                    x.seek(got[nm][0])
+                    same = same and x.read(len(new)) == new
+            if not same:
+                raise UnpackError(f"{nm} in the XCI that was built doesn't match its source; it was discarded")
+            done += size
+            prog(done / total)
+
+
+def nsp_verify(path, files, prog, stopped):
+    """Reads a finished NSP back against the files it was built from."""
+    with open(path, "rb") as f:
+        lst = pfs0_list(f)
+        if [(n, s) for n, _o, s in lst] != [(n, s) for n, s, _p, _q in files]:
+            raise UnpackError("the NSP that was built doesn't list the same files; it was discarded")
+        total, done = max(1, sum(x[1] for x in files)), 0
+        for (n, o, s), (_n, _s, src, so) in zip(lst, files):
+            with open(src, "rb") as g:
+                if _digest(f, o, s, stopped) != _digest(g, so, s, stopped):
+                    raise UnpackError(f"{n} in the NSP that was built doesn't match its source; it was discarded")
+            done += s
+            prog(done / total)
+
+
+def sw_gc_size(total):
+    for code, size in ((0xFA, 1 << 30), (0xF8, 2 << 30), (0xF0, 4 << 30), (0xE0, 8 << 30), (0xE1, 16 << 30), (0xE2, 32 << 30)):
+        if total <= size:
+            return code
+    return 0xE2
+
+
+def hfs0_head(entries):
+    """HFS0 header bytes for [(name, size, hashed size, sha256 of its first bytes)] laid end to end, padded to a multiple of 0x200."""
+    strs, offs = b"", []
+    for e in entries:
+        offs.append(len(strs))
+        strs += e[0].encode() + b"\0"
+    strs += bytes(-(16 + 64 * len(entries) + len(strs)) % 0x200)       # the padding counts as part of the name table, so the header ends where the data starts
+    body, pos = b"", 0
+    for (nm, size, hs, dg), so in zip(entries, offs):
+        body += struct.pack("<QQIIQ", pos, size, so, hs, 0) + dg
+        pos += size
+    return b"HFS0" + struct.pack("<III", len(entries), len(strs), 0) + body + strs
+
+
+def build_xci(plan, dest, keys, prog=None, stopped=lambda: False):
+    """Writes an XCI (a cartridge image holding the game's files) from a sw_plan. It is meant for emulators: the header's signature is not a real one."""
+    import hashlib
+    opened = {}
+
+    def src(p):
+        if p not in opened:
+            opened[p] = open(p, "rb")
+        return opened[p]
+    try:
+        members = []                                          # [(name, size, first bytes, plan row)]
+        for p, nm, o, sz, new in plan:
+            first = new[:0x200] if new else (src(p).seek(o), src(p).read(min(0x200, sz)))[1]
+            members.append((nm, sz, first, (p, o, new)))
+        sec = [(nm, sz, min(0x200, sz), hashlib.sha256(first[:0x200]).digest()) for nm, sz, first, _r in members]
+        sechead = hfs0_head(sec)
+        secsize = len(sechead) + sum(m[1] for m in members)
+        empty = hfs0_head([])
+        parts = [("update", empty), ("normal", empty), ("secure", sechead)]
+        rooth = hfs0_head([(n, len(h) if n != "secure" else secsize, 0x200 if n != "secure" else len(sechead), hashlib.sha256(h[:len(h)]).digest())
+                           for n, h in parts])
+        total = 0xF000 + len(rooth) + len(empty) * 2 + secsize
+        secstart = 0xF000 + len(rooth) + 2 * len(empty)
+        iv = os.urandom(16)
+        head = bytearray(0x200)
+        head[0:0x100] = os.urandom(0x100)
+        head[0x100:0x104] = b"HEAD"
+        head[0x104:0x108] = struct.pack("<I", secstart // 0x200)
+        head[0x108:0x10C] = b"\xff\xff\xff\xff"
+        head[0x10D] = sw_gc_size(total)
+        head[0x110:0x118] = bytes.fromhex("8750F4C0A9C5A966")
+        head[0x118:0x120] = struct.pack("<Q", (total - 1) // 0x200)
+        head[0x120:0x130] = iv
+        head[0x130:0x138] = struct.pack("<Q", 0xF000)
+        head[0x138:0x140] = struct.pack("<Q", len(rooth))
+        head[0x140:0x160] = hashlib.sha256(rooth).digest()
+        head[0x160:0x180] = hashlib.sha256(bytes(0x200)).digest()
+        head[0x180:0x184] = struct.pack("<I", 1)
+        head[0x184:0x188] = struct.pack("<I", 2)
+        head[0x18C:0x190] = struct.pack("<I", secstart // 0x200)
+        if keys and "xci_header_key" in keys:
+            info = bytes.fromhex("0100000000000000" "88130000" "00110C00" "5a000200" "9bfb03ddbb7c5fca" "1608000000000001")
+            info = info.ljust(0x70, bytes(1))
+            head[0x190:0x200] = sw_cbc_encrypt(keys["xci_header_key"], iv[::-1], info)
+        done, grand = 0, max(1, sum(m[1] for m in members))
+        with open(dest, "wb") as out:
+            out.write(bytes(head) + bytes(0x6E00) + b"\xff" * 0x8000)
+            out.write(rooth + empty + empty + sechead)
+            for nm, sz, first, (p, o, new) in members:
+                f, left, pos = src(p), sz, 0
+                if new:
+                    out.write(new)
+                    pos = len(new)
+                    left -= pos
+                    done += pos
+                f.seek(o + pos)
+                while left > 0:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    b = f.read(min(1 << 22, left))
+                    if not b:
+                        raise UnpackError(f"{nm} is cut short")
+                    out.write(b)
+                    left -= len(b)
+                    done += len(b)
+                    if prog:
+                        prog(done / grand)
+    finally:
+        for f in opened.values():
+            f.close()
+
+
+def build_nsp(files, dest, prog=None, stopped=lambda: False):
+    """Writes an NSP (the plain package format) from [(name, size, path, offset)]; the files are copied as they are."""
+    strs, offs = b"", []
+    for nm, *_r in files:
+        offs.append(len(strs))
+        strs += nm.encode() + b"\0"
+    strs += bytes(-(16 + 24 * len(files) + len(strs)) % 0x20)
+    head, pos = b"PFS0" + struct.pack("<III", len(files), len(strs), 0), 0
+    for (nm, sz, _p, _o), so in zip(files, offs):
+        head += struct.pack("<QQII", pos, sz, so, 0)
+        pos += sz
+    head += strs
+    opened = {}
+    done, grand = 0, max(1, sum(x[1] for x in files))
+    try:
+        with open(dest, "wb") as out:
+            out.write(head)
+            for nm, sz, p, o in files:
+                if p not in opened:
+                    opened[p] = open(p, "rb")
+                f, left = opened[p], sz
+                f.seek(o)
+                while left > 0:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    b = f.read(min(1 << 22, left))
+                    if not b:
+                        raise UnpackError(f"{nm} is cut short")
+                    out.write(b)
+                    left -= len(b)
+                    done += len(b)
+                    if prog:
+                        prog(done / grand)
+    finally:
+        for f in opened.values():
+            f.close()
 
 
 # ---- writing a disc image
@@ -6571,7 +7114,7 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",)}
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",)}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
@@ -6764,7 +7307,7 @@ DEFAULTS = {
     "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
-    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "pkg_key": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
+    "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "pkg_key": "", "switch_keys": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
 }
 
 
@@ -7068,7 +7611,7 @@ class App:
         for key in ("compression", "custom_comp", "hunk", "threads", "verify_after", "low_priority", "delete_src", "delete_forever",
                     "exists", "out_mode", "out_dir", "auto_suggest"):
             self.v[key].trace_add("write", lambda *a: self.refresh_summary())
-        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3", "pkg_key"):
+        for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3", "pkg_key", "switch_keys"):
             self.v[key].trace_add("write", lambda *a: self.refresh_wii())
         self.style_widgets()
         self.refresh_summary()
@@ -7222,6 +7765,21 @@ class App:
         ttk.Button(kf, text="Forget the key", command=lambda: self.v["pkg_key"].set("")).grid(row=0, column=3, padx=4)
         self.rpcs3_status = ttk.Label(g4, text="", style="Muted.TLabel", wraplength=560, justify="left")
         self.rpcs3_status.grid(row=6, column=0, sticky="w", pady=(4, 0))
+
+        g5 = ttk.LabelFrame(f, text=" Nintendo Switch (NSP ↔ XCI) ", padding=10)
+        g5.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(g5, text="Some Switch games are locked with a ticket, and turning them into an XCI needs your own keys (your prod.keys).\n"
+                           "CHD Manager contains no keys and never downloads them. Choose your prod.keys file, or open it in a text editor,\n"
+                           "copy everything and paste it here. Only the few keys this uses are kept; nothing else is stored.").grid(row=0, column=0, sticky="w")
+        self.sw_keys_box = tk.Text(g5, width=60, height=3, wrap="none")
+        self.sw_keys_box.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        sf = ttk.Frame(g5)
+        sf.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(sf, text="Use these keys", command=self.take_switch_keys).grid(row=0, column=0)
+        ttk.Button(sf, text="Choose prod.keys file…", command=self.pick_switch_keys_file).grid(row=0, column=1, padx=4)
+        ttk.Button(sf, text="Forget the keys", command=lambda: self.v["switch_keys"].set("")).grid(row=0, column=2)
+        self.sw_status = ttk.Label(g5, text="", style="Muted.TLabel", wraplength=560, justify="left")
+        self.sw_status.grid(row=3, column=0, sticky="w", pady=(4, 0))
 
         # --- Output
         f = tab("Output")
@@ -8199,7 +8757,7 @@ class App:
             else:
                 jobs_from.append((f, root, None, None))
         have = {str(j.path).lower() for j in self.jobs}
-        have |= {str(x).lower() for j in self.jobs if j.container == "ps3pkg" for x in j.src_files}
+        have |= {str(x).lower() for j in self.jobs if j.container in ("ps3pkg", "swnsp") for x in j.src_files}
         listed = set(have)
         was_empty = not self.jobs
         added = 0
@@ -8218,6 +8776,21 @@ class App:
             if arc:
                 job.archive, job.extract_dir, job.home, job.src_files = arc, tmp, arc.parent / f.name, [arc]
                 self.arc_dirs[tmp] += 1
+            if job.container == "swnsp" and job.nsps[0]["base"]:
+                mate = next((j for j in self.jobs if j.container == "swnsp" and j.nsps[0]["base"] == job.nsps[0]["base"]
+                             and not j.status.startswith("Done")), None)
+                if mate is not None:
+                    new = job.nsps[0]
+                    twin = next((i for i in mate.nsps if i["tid"] == new["tid"] and i["version"] == new["version"]), None)
+                    if twin is not None:
+                        self.refuse(f.name, sentence(f"it is the same package as {twin['path'].name}, which is already in the list"), "warn")
+                        continue
+                    mate.add_nsp(job)
+                    have.add(str(f).lower())
+                    added += 1
+                    self.refresh_job(mate)
+                    self.log(f"{f.name} is for the same game as {mate.nsps[0]['path'].name}, so they are one item: the game, then its newest update, then its extra content.", "info")
+                    continue
             if job.container == "ps3pkg":
                 mate = next((j for j in self.jobs if j.container == "ps3pkg" and j.pkgs[0]["title_id"] == job.pkgs[0]["title_id"]
                              and not j.status.startswith("Done")), None)
@@ -8457,7 +9030,7 @@ class App:
                     pieces_seen.add(first)
                     found.append(first)
             elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
-                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg"):
+                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
                 found.append(f)
@@ -8586,6 +9159,27 @@ class App:
                 if Path(p).stat().st_size > 4096:
                     raise OSError("that file is too big to be a key file")
                 self.take_pkg_key(Path(p).read_bytes())
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Couldn't read that file: {e}", parent=self.settings_win)
+
+    def take_switch_keys(self, data=None):
+        keys = parse_switch_keys(self.sw_keys_box.get("1.0", "end") if data is None else data)
+        if not keys or "header_key" not in keys:
+            messagebox.showerror(APP_NAME, "That doesn't look like a prod.keys file (it has no header_key line). Copy the whole file, or choose it with the button.",
+                                 parent=self.settings_win)
+            return
+        self.v["switch_keys"].set(switch_keys_text(keys))
+        self.sw_keys_box.delete("1.0", "end")
+        self.save_settings()
+
+    def pick_switch_keys_file(self):
+        p = filedialog.askopenfilename(parent=self.settings_win, title="Choose your prod.keys file",
+                                       filetypes=[("Key files", "*.keys *.txt"), ("All files", "*.*")])
+        if p:
+            try:
+                if Path(p).stat().st_size > 1 << 20:
+                    raise OSError("that file is too big to be a key file")
+                self.take_switch_keys(Path(p).read_bytes())
             except OSError as e:
                 messagebox.showerror(APP_NAME, f"Couldn't read that file: {e}", parent=self.settings_win)
 
@@ -9351,6 +9945,10 @@ class App:
             return self.do_folder_to_pkg(job, o)
         if t == "folder" and job.container == "ps3pkg":
             return self.do_pkg_to_folder(job, o)
+        if t == "xci" and job.container == "swnsp":
+            return self.do_nsp_to_xci(job, o)
+        if t == "nsp" and job.container == "swxci":
+            return self.do_xci_to_nsp(job, o)
         if t == "folder":
             return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
@@ -9954,6 +10552,95 @@ class App:
         job.status, job.result = "Done", f"→ {out.name}"
         self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
 
+    def sw_finish(self, job, out, part, label):
+        os.replace(part, out)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+
+    def do_nsp_to_xci(self, job, o):
+        """Switch packages (the game, its newest update, its extra content) -> one XCI cartridge image, using the user's own keys when a game needs them."""
+        keys = parse_switch_keys(o.get("switch_keys", ""))
+        infos = job.nsps
+        if not any(i["kind"] in ("base", "") for i in infos):
+            job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP as well, because an XCI needs the game"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        if any(i["ticketed"] for i in infos) and not keys:
+            job.status, job.result = "Failed (setup needed)", ("this game needs your own keys to be converted: Settings, Formats, Nintendo Switch, "
+                                                               "and choose your prod.keys file or paste it in")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".xci"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        self.post("log", f"\n{job.path.name}  [Switch package{'s' if len(infos) != 1 else ''} → XCI]  (for emulators and flash carts; a real console would also want "
+                         "Nintendo's signature, which nobody can make)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Building XCI")
+        stop = lambda: self.stop_flag  # noqa: E731
+        try:
+            plan = sw_plan(infos, keys)
+            used = {r[0] for r in plan}
+            for i in infos:
+                if i["path"] not in used:
+                    self.post("log", f"{i['path'].name} was left out: a newer update for the same game is in the list, and a Switch update is a patch against the game itself, "
+                                     "so only the newest is needed. (Make it a separate item if you want it in its own file.)", "info")
+            build_xci(plan, part, keys, lambda x: prog(x * (0.7 if verify else 1.0)), stop)
+            if verify:
+                self.post("log", "Reading the new XCI back against the packages…", "info")
+                xci_verify(part, plan, lambda x: prog(0.7 + x * 0.3), stop)
+            self.sw_finish(job, out, part, "XCI")
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_xci_to_nsp(self, job, o):
+        """A Switch XCI -> an NSP holding the same files, unchanged."""
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nsp"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        self.post("log", f"\n{job.path.name}  [XCI → NSP]  (the game's files are copied as they are)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Building NSP")
+        stop = lambda: self.stop_flag  # noqa: E731
+        try:
+            files = [(n, s, job.path, off) for n, off, s in xci_files(job.path)]
+            build_nsp(files, part, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            if verify:
+                self.post("log", "Reading the new NSP back against the XCI…", "info")
+                nsp_verify(part, files, lambda x: prog(0.6 + x * 0.4), stop)
+            self.sw_finish(job, out, part, "NSP")
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
     def do_join_ps3(self, job, o):
         """The pieces of a split PS3 disc image -> one ISO."""
         out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
@@ -10265,6 +10952,11 @@ class App:
     def refresh_wii(self):
         RPCS3[0] = find_rpcs3(self.v["rpcs3"].get().strip())
         PKG_KEY[0] = parse_hex_key(self.v["pkg_key"].get())
+        SWITCH_KEYS[0] = parse_switch_keys(self.v["switch_keys"].get())
+        if hasattr(self, "sw_status"):
+            k = SWITCH_KEYS[0]
+            self.sw_status.config(text=(f"✓ Keys are set ({len(k)} kept)." + ("" if "header_key" in k else " The header_key line is missing, so they can't be used.")) if k
+                                  else "Keys: not set. Games without a ticket convert without them.")
         if hasattr(self, "rpcs3_status"):
             self.rpcs3_status.config(text=(f"✓ RPCS3 found: {RPCS3[0]}" if RPCS3[0] else "RPCS3: not set yet.") + "   " +
                                      ("✓ A package key is set." if PKG_KEY[0] else "Package key: not set.") +
@@ -11686,6 +12378,7 @@ def cli_main(argv):
     ap.add_argument("--wii-key", metavar="HEX", help="your Wii common key (32 hex characters); or put it in the keys folder")
     ap.add_argument("--rpcs3", metavar="EXE", help="your rpcs3.exe, used to unpack PS3 .pkg packages")
     ap.add_argument("--pkg-key", metavar="HEX", help="your own PS3 package key (32 hex characters), used to unpack .pkg packages when there is no RPCS3")
+    ap.add_argument("--switch-keys", metavar="FILE", help="your own prod.keys, used to turn Switch NSP files that have tickets into XCI")
     ap.add_argument("--dolphintool", metavar="EXE", help="your DolphinTool.exe, used for Wii RVZ/WIA when there is no key")
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
@@ -11731,7 +12424,7 @@ def cli_main(argv):
     code = 1
     try:
         for k, d in DEFAULTS.items():                    # only the machine's own paths come from the saved settings
-            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "rpcs3", "pkg_key", "wii_common_key", "wii_korean_key"):
+            if k in app.v and k not in ("base_pbp", "art_dir", "dolphintool", "rpcs3", "pkg_key", "switch_keys", "wii_common_key", "wii_korean_key"):
                 app.v[k].set(d)
         v = app.v
         if a.output:
@@ -11759,6 +12452,16 @@ def cli_main(argv):
             v["rpcs3"].set(a.rpcs3)
         if a.pkg_key:
             v["pkg_key"].set(a.pkg_key)
+        if a.switch_keys:
+            try:
+                ks = parse_switch_keys(Path(a.switch_keys).read_bytes())
+            except OSError as e:
+                print(f"Can't read {a.switch_keys}: {e}")
+                return 1
+            if not ks:
+                print(f"{a.switch_keys} doesn't look like a prod.keys file")
+                return 1
+            v["switch_keys"].set(switch_keys_text(ks))
         if a.rvz_method:
             v["rvz_method"].set(a.rvz_method)
         if a.rvz_level:
