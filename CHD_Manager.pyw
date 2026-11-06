@@ -4255,7 +4255,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4297,7 +4297,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
 SPACE_RATIO = {"z3ds": 0.8, "chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
-SPACE_EXT = {"z3ds": ".zcci", "unz3ds": ".cci", "xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
+SPACE_EXT = {"cia": ".cia", "z3ds": ".zcci", "unz3ds": ".cci", "xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
              "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
@@ -4346,6 +4346,7 @@ class Job:
         self.m3u_chds = []             # for a playlist: its CHD files, one per disc
         self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
+        self.z3_cia = False            # a decrypted cartridge dump, which can also become a CIA
         self.z3_raw = 0                # a 3DS file: its size when not compressed
         self.xiso_base = 0             # an original Xbox disc dump whose game data starts later in the file (a full Redump-style dump)
         self.xbox = False              # an ISO that is an Xbox 360 disc image
@@ -4427,7 +4428,8 @@ class Job:
         if self.container == "zar":                 # Xbox 360: the files become a disc image, or a CHD of one
             return [(k, target_label(k)) for k in ("chd", "iso", "folder")]
         if self.container == "z3ds":                # a 3DS file: compressed for Azahar, or back to the plain file
-            return [("unz3ds" if self.path.suffix.lower() in Z3_PACKED else "z3ds", target_label("unz3ds" if self.path.suffix.lower() in Z3_PACKED else "z3ds"))]
+            keys = ["unz3ds"] if self.path.suffix.lower() in Z3_PACKED else ["z3ds"] + (["cia"] if self.z3_cia else [])
+            return [(k, target_label(k)) for k in keys]
         if self.container == "xfolder":
             return [(k, target_label(k)) for k in (("chd", "iso") if self.platform == "Xbox" else ("chd", "iso", "zar"))]
         if self.platform == "Xbox" and self.path.suffix.lower() == ".iso" and self.container != "disc":
@@ -4624,6 +4626,7 @@ class Job:
                 self.reason = f"Nintendo 3DS file, compressed for Azahar ({fmt_size(h['usize'])} when unpacked)"
             else:
                 _magic, enc = z3ds_plain_info(p)
+                self.z3_cia = ext in (".3ds", ".cci") and not enc
                 self.z3_raw = p.stat().st_size
                 self.reason = "Nintendo 3DS file"
                 if enc:
@@ -5369,6 +5372,185 @@ def z3ds_matches(packed, plain, prog, stopped):
             done += len(blk)
             prog(done / max(1, usize))
         return not f.read(1)
+
+
+# ---- Nintendo 3DS: a decrypted cartridge dump (.3ds / .cci) -> a CIA. The CIA's ticket and TMD are written here from the public 3DS layout and
+# are NOT signed, and its certificate area is left empty, so it is for emulators (Azahar doesn't check them) and for custom-firmware consoles
+# that skip signature checks. Only decrypted dumps are handled: an encrypted one would need keys, and nothing here uses any.
+CIA_CONTENT_INDEX = bytes.fromhex("00010014000000ac000000140001001400000000000000280000000100000084000000840003000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+
+
+def _align(n, a=0x40):
+    return (n + a - 1) // a * a
+
+
+def cci_parts(path):
+    """[(index, offset, size)] of the cartridge image's partitions that go into a CIA (the game, its manual, its Download Play child).
+    Raises ValueError with a plain sentence when the dump is damaged or encrypted."""
+    with open(path, "rb") as f:
+        head = f.read(0x200)
+        if len(head) < 0x200 or head[0x100:0x104] != b"NCSD":
+            raise ValueError("this isn't a Nintendo 3DS cartridge dump (it doesn't start like one)")
+        out = []
+        for i in range(3):
+            off, units = struct.unpack_from("<II", head, 0x120 + i * 8)
+            if not units:
+                if i == 0:
+                    raise ValueError("this 3DS dump holds no game")
+                continue
+            f.seek(off * 0x200)
+            h = f.read(0x200)
+            if len(h) < 0x200 or h[0x100:0x104] != b"NCCH":
+                raise ValueError("this 3DS dump is damaged (a part of it can't be read)")
+            if not h[0x18F] & 4:
+                raise ValueError("this 3DS dump is encrypted, and a CIA can only be made from a decrypted one (CHD Manager doesn't decrypt anything)")
+            size = struct.unpack_from("<I", h, 0x104)[0] * 0x200
+            if not size or size > units * 0x200 or (off * 0x200 + size) > os.path.getsize(path):
+                raise ValueError("this 3DS dump is damaged or cut short (a part is bigger than the file)")
+            out.append((i, off * 0x200, size))
+    return out
+
+
+def cci_to_cia(src, dest, prog, stopped):
+    """A decrypted .3ds / .cci -> a CIA (unsigned; see above)."""
+    parts = cci_parts(src)
+    n = len(parts)
+    with open(src, "rb") as f:
+        f.seek(parts[0][1])
+        ch = bytearray(f.read(0x200))
+        ex = bytearray(f.read(0x400))
+        if len(ex) < 0x400:
+            raise ValueError("this 3DS dump is damaged (its game information is cut short)")
+        ex[0xD] |= 2                                             # installed games keep their saves on the SD card
+        ch[0x160:0x180] = hashlib.sha256(ex).digest()
+        tid = bytes(reversed(ch[0x108:0x110]))
+        icon = bytes(0x36C0)
+        eoff, esz = struct.unpack_from("<II", ch, 0x1A0)
+        if eoff and esz:
+            f.seek(parts[0][1] + eoff * 0x200)
+            eh = f.read(0x200)
+            for k in range(10):
+                name, o, sz = struct.unpack_from("<8sII", eh, k * 16)
+                if name.rstrip(b"\0") == b"icon" and 0 < sz <= 0x36C0:
+                    f.seek(parts[0][1] + eoff * 0x200 + 0x200 + o)
+                    icon = f.read(sz).ljust(0x36C0, b"\0")
+                    break
+    sizes = [p[2] for p in parts]
+    tmd_size = 0xB04 + 0x30 * n
+    tik_off = 0x2040 + 0xA00
+    tmd_off = _align(tik_off + 0x350)
+    meta_off = _align(tmd_off + tmd_size)
+    content_off = _align(meta_off + 0x3AC0)
+    mask = bytearray(0x2000)
+    for i, _o, _s in parts:
+        mask[i // 8] |= 0x80 >> (i % 8)
+    tik = bytearray(0x350)
+    tik[0:4] = b"\x00\x01\x00\x04"
+    tik[0x140:0x140 + 26] = b"Root-CA00000003-XS0000000c"
+    tik[0x1BC] = 1
+    tik[0x1DC:0x1E4] = tid
+    tik[0x221] = 1
+    tik[0x2A4:0x350] = CIA_CONTENT_INDEX
+    meta = bytes(ex[0x40:0x1C0]) + bytes(0x180) + struct.pack("<I", 2) + bytes(0xFC) + icon
+    total = sum(sizes)
+    hashes = []
+    with open(src, "rb") as a, open(dest, "wb") as b:
+        b.write(struct.pack("<IHHIIIIQ", 0x2020, 0, 0, 0xA00, 0x350, tmd_size, 0x3AC0, total) + bytes(mask))
+        b.write(bytes(tik_off - b.tell()))                       # the certificate area (empty)
+        b.write(tik)
+        b.write(bytes(tmd_off - b.tell()))
+        b.write(bytes(tmd_size))                                 # the TMD, filled in once the content hashes are known
+        b.write(bytes(meta_off - b.tell()))
+        b.write(meta)
+        b.write(bytes(content_off - b.tell()))
+        done = 0
+        for k, (idx, off, size) in enumerate(parts):
+            if stopped():
+                raise UnpackError("stopped")
+            h = hashlib.sha256()
+            pos = 0
+            a.seek(off)
+            if k == 0:
+                b.write(ch)
+                b.write(ex)
+                h.update(ch)
+                h.update(ex)
+                pos = 0x600
+                a.seek(off + 0x600)
+            while pos < size:
+                if stopped():
+                    raise UnpackError("stopped")
+                blk = a.read(min(4 << 20, size - pos))
+                if not blk:
+                    raise UnpackError("the dump is shorter than it should be")
+                b.write(blk)
+                h.update(blk)
+                pos += len(blk)
+                done += len(blk)
+                prog(done / max(1, total))
+            hashes.append(h.digest())
+        chunks = b"".join(struct.pack(">IHHQ", idx, idx, 0, sz) + hashes[k] for k, (idx, _o, sz) in enumerate(parts))
+        block = struct.pack(">HH", 0, n) + hashlib.sha256(chunks).digest()
+        block = block.ljust(0x900, b"\0")
+        tmd = bytearray(tmd_size)
+        tmd[0:4] = b"\x00\x01\x00\x04"
+        tmd[0x140:0x140 + 26] = b"Root-CA00000003-CP0000000b"
+        tmd[0x180] = 1
+        tmd[0x18C:0x194] = tid
+        tmd[0x197] = 0x40
+        tmd[0x19A:0x19E] = ex[0x1C0:0x1C4]
+        tmd[0x1DE:0x1E0] = struct.pack(">H", n)
+        tmd[0x1E4:0x204] = hashlib.sha256(block).digest()
+        tmd[0x204:0xB04] = block
+        tmd[0xB04:] = chunks
+        b.seek(tmd_off)
+        b.write(tmd)
+
+
+def cia_matches(cia, cci, prog, stopped):
+    """True when a CIA made by cci_to_cia holds exactly the dump's data (apart from the two small patched headers) and its TMD's hashes match."""
+    parts = cci_parts(cci)
+    with open(cia, "rb") as f:
+        hd = f.read(0x2020)
+        _hs, _t, _v, csz, tsz, msz, metasz, total = struct.unpack_from("<IHHIIIIQ", hd, 0)
+        tik_off = _align(0x2020) + _align(csz)
+        tmd_off = _align(tik_off + tsz)
+        content_off = _align(_align(tmd_off + msz) + metasz)
+        f.seek(tmd_off)
+        tmd = f.read(msz)
+        n = struct.unpack_from(">H", tmd, 0x1DE)[0]
+        if n != len(parts) or total != sum(p[2] for p in parts):
+            return False
+        block = tmd[0x204:0xB04]
+        if hashlib.sha256(block).digest() != tmd[0x1E4:0x204] or hashlib.sha256(tmd[0xB04:]).digest() != block[4:0x24]:
+            return False
+        f.seek(content_off)
+        done = 0
+        with open(cci, "rb") as a:
+            for k, (idx, off, size) in enumerate(parts):
+                rec = tmd[0xB04 + 0x30 * k:0xB04 + 0x30 * (k + 1)]
+                h = hashlib.sha256()
+                pos = 0
+                if k == 0:                                         # the two headers were patched on purpose
+                    head = f.read(0x600)
+                    h.update(head)
+                    pos = 0x600
+                    a.seek(off + 0x600)
+                else:
+                    a.seek(off)
+                while pos < size:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    x = f.read(min(4 << 20, size - pos))
+                    if x != a.read(len(x)) or not x:
+                        return False
+                    h.update(x)
+                    pos += len(x)
+                    done += len(x)
+                    prog(done / max(1, total))
+                if h.digest() != rec[0x10:0x30] or struct.unpack_from(">Q", rec, 8)[0] != size:
+                    return False
+    return True
 
 
 STFS_TYPES = {0x7000: "a Games on Demand title", 0xD0000: "an Xbox Live Arcade game", 0xB0000: "a title update", 0x2: "downloadable content",
@@ -8068,7 +8250,7 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",), ".3ds": ("z3ds",), ".cci": ("z3ds",), ".cxi": ("z3ds",), ".3dsx": ("z3ds",),
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",), ".3ds": ("z3ds", "cia"), ".cci": ("z3ds", "cia"), ".cxi": ("z3ds",), ".3dsx": ("z3ds",),
                ".zcci": ("unz3ds",), ".zcxi": ("unz3ds",), ".z3dsx": ("unz3ds",)}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
@@ -10548,7 +10730,7 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso", "z3ds", "unz3ds")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso", "z3ds", "unz3ds", "cia")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         if o.get("psp_drop_update") and job.platform == "PSP" and ext == ".iso" and t in ("chd", "cso", "cso2", "zso"):
@@ -11044,6 +11226,8 @@ class App:
             return self.do_sw_split(job, o)
         if t in ("z3ds", "unz3ds") and job.container == "z3ds":
             return self.do_z3ds(job, o)
+        if t == "cia" and job.container == "z3ds":
+            return self.do_cci_to_cia(job, o)
         if t == "folder":
             return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
@@ -11206,6 +11390,43 @@ class App:
                 a, b = (part, job.path) if packing else (job.path, part)
                 if not z3ds_matches(a, b, self.cso_progress(job, "Verifying"), stop):
                     job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_cci_to_cia(self, job, o):
+        """A decrypted 3DS cartridge dump -> an (unsigned) CIA."""
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".cia"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [3DS → CIA]", "info")
+        self.post("log", "This CIA is not signed and has no certificates: it is for emulators and for custom-firmware consoles.", "warn")
+        try:
+            cci_to_cia(job.path, part, self.cso_progress(job, "Building CIA"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new CIA back against the dump…", "info")
+                if not cia_matches(part, job.path, self.cso_progress(job, "Verifying"), stop):
+                    job.status, job.result = "Verify failed", "the new CIA didn't match the dump; it was discarded."
                     self.post("log", f"{job.path.name}: {job.result}", "err")
                     return
             os.replace(part, out)
