@@ -8710,10 +8710,16 @@ class App:
     def apply_suggestions(self, quiet=False, hardware_only=False):
         if not self.sugg:
             self.refresh_suggestions()
+        mine = self.__dict__.setdefault("auto_applied", {})        # what the program itself set, so it can tell that from what the person chose
         for k, val in self.sugg["values"].items():
             if hardware_only and k not in ("threads", "low_priority"):
                 continue
+            if quiet:                                          # applied on its own: only where the person has chosen nothing of their own
+                cur = self.v[k].get()
+                if cur != DEFAULTS.get(k) and cur != mine.get(k):
+                    continue
             self.v[k].set(val)
+            mine[k] = val
         if not quiet:
             self.status.config(text="Suggested settings applied.")
             self.log("Suggested settings applied: compression Default, hunk default, "
@@ -9386,6 +9392,14 @@ class App:
             if p.is_dir():
                 self.add_progress(0, 1, f"Looking through {p.name}…")
                 files, ignored = self.scan_folder(p)
+                od = self.options().get("out_dir") if self.options().get("out_mode") == "custom" else ""
+                if od:                                            # what an earlier run wrote into the output folder is not a new game
+                    try:
+                        odp = Path(od).resolve()
+                        if odp != p.resolve() and p.resolve() in odp.parents:
+                            files = [f for f in files if odp not in Path(f).resolve().parents and Path(f).resolve() != odp]
+                    except OSError:
+                        pass
                 found += [(f, p) for f in files]
                 if not files and not ignored:
                     self.refuse(p.name, "No disc images or game folders (Xbox 360, PlayStation 3) were found in this folder (its sub-folders were searched too).", "warn")
@@ -9411,6 +9425,11 @@ class App:
             if (f, _r) not in mine:
                 self.log(f"{f.name} belongs to {refs[str(f).lower()]}, so it is not added on its own.", "info")
         found = mine
+        if len(found) > 100 and not self.silent:
+            if not messagebox.askyesno(APP_NAME, f"That is {len(found)} disc files and game folders. Add all of them?\n\n"
+                                                 "(If you picked a whole drive or a big folder by mistake, choose No and pick the folder with your games in it.)"):
+                self.update_status_idle()
+                return 0
         jobs_from = []   # (file, root, archive, folder it was unpacked into)
         known = {str(j.archive).lower() for j in self.jobs if j.archive}
         for f, root in found:
@@ -9670,6 +9689,7 @@ class App:
         found, ignored = [], {}
         allf, games = [], []
         for dp, dn, fns in os.walk(p):
+            dn[:] = [x for x in dn if x.upper() not in ("$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION") and not x.startswith(".chdm_arc_")]
             if any(x.upper() == "PS3_GAME" for x in dn) and ps3_folder_info(Path(dp)) is not None:
                 games.append(Path(dp))                          # a PS3 game folder: taken whole
                 dn[:] = []
@@ -9742,12 +9762,22 @@ class App:
         self.status.config(text=f"Unpacking {arc.name}…")
         self.root.update_idletasks()
 
+        def room(total):
+            free = shutil.disk_usage(tmp).free
+            if total * 1.03 + SPACE_MARGIN > free:
+                raise RuntimeError(f"unpacking it needs about {fmt_size(total)} but only {fmt_size(free)} is free there. Free up some room first")
+
         def run():
             if ext == ".zip":
                 with zipfile.ZipFile(arc) as z:
+                    infos = z.infolist()
+                    if any(i.flag_bits & 1 for i in infos):
+                        raise RuntimeError("it is password-protected, which CHD Manager can't open. Unpack it yourself first")
+                    room(sum(i.file_size for i in infos))
                     z.extractall(tmp)
             elif ext in (".tar", ".tgz") or name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
                 with tarfile.open(arc) as t:
+                    room(sum(mm.size for mm in t.getmembers() if mm.isfile()))
                     t.extractall(tmp, filter="data")
             elif ext == ".gz":
                 with gzip.open(arc) as src, open(tmp / arc.stem, "wb") as dst:
@@ -9756,8 +9786,8 @@ class App:
                 z = find_7z()
                 if not z:
                     raise RuntimeError("7-Zip is needed for this kind of archive (Settings, Output page, or install it from 7-zip.org)")
-                r = subprocess.run([z, "x", "-y", f"-o{tmp}", str(arc), "-bso0", "-bsp0"], capture_output=True,
-                                   creationflags=CREATE_NO_WINDOW)
+                r = subprocess.run([z, "x", "-y", f"-o{tmp}", str(arc), "-bso0", "-bsp0"], capture_output=True, stdin=subprocess.DEVNULL,
+                                   creationflags=CREATE_NO_WINDOW, timeout=6 * 3600)
                 if r.returncode:
                     raise RuntimeError((r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:] or f"7-Zip exited with {r.returncode}")
         if ext in (".7z", ".rar") and not find_7z() and not self.silent and not self.ensure_7zip():
