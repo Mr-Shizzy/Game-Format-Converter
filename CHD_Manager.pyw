@@ -4536,6 +4536,9 @@ class Job:
                 self.container, self.platform, self.types = "swxci", "Switch", ["MODE1"]
                 self.size, self.src_files = p.stat().st_size, [p]
                 self.auto_type, self.reason = "DVD", f"Switch cartridge image ({len(files)} files)"
+                g = xci_gen(p, SWITCH_KEYS[0])
+                if g is not None and g >= 0:
+                    self.reason += f", made for firmware {sw_fw(g)}+"
                 return
             info = nsp_info(p, SWITCH_KEYS[0])
             self.container, self.platform, self.types = "swnsp", "Switch", ["MODE1"]
@@ -4543,7 +4546,11 @@ class Job:
             self.size, self.src_files = info["size"], [p]
             self.auto_type = "DVD"
             self.reason = {"base": "Switch game", "update": "Switch update", "dlc": "Switch extra content"}.get(info["kind"], "Switch package")
-            if info["ticketed"] and not SWITCH_KEYS[0]:
+            if info["gen_idx"] is not None and info["gen_idx"] >= 0:
+                self.reason += f", made for firmware {sw_fw(info['gen_idx'])}+"
+            if info["ticketed"] and info["key_idx"] is not None and info["key_idx"] > sw_level(SWITCH_KEYS[0]):
+                self.warn = sw_fw_message("it", info["key_idx"], sw_level(SWITCH_KEYS[0]))
+            elif info["ticketed"] and not SWITCH_KEYS[0]:
                 self.warn = ("it needs your own keys to be converted to an XCI, and none are set up yet "
                              "(Settings, Formats, Nintendo Switch: choose your prod.keys file or paste it in)")
             return
@@ -4751,6 +4758,9 @@ class Job:
         ups, dlcs = sum(1 for i in self.nsps if i["kind"] == "update"), sum(1 for i in self.nsps if i["kind"] == "dlc")
         extra = ([f"{ups} update{'s' if ups != 1 else ''}"] if ups else []) + ([f"{dlcs} extra content"] if dlcs else [])
         self.reason = "Switch game" + (" with " + " and ".join(extra) if extra else "")
+        gens = [i["gen_idx"] for i in self.nsps if i["gen_idx"] is not None]
+        if gens and max(gens) >= 0:
+            self.reason += f", made for firmware {sw_fw(max(gens))}+"
         self._raw = None
 
     def row(self):
@@ -6047,7 +6057,34 @@ def switch_keys_text(keys):
     return "\n".join(f"{k}={v.hex()}" for k, v in sorted(keys.items())) if keys else ""
 
 
+# the Switch firmware each master key goes with (master_key_00, _01, ...); a key past the end of this list is from a newer firmware than this program knows
+SW_FW = ["1.0.0", "3.0.0", "3.0.1", "4.0.0", "5.0.0", "6.0.0", "6.2.0", "7.0.0", "8.1.0", "9.0.0", "9.1.0", "12.1.0", "13.0.0", "14.0.0", "15.0.0",
+         "16.0.0", "17.0.0", "18.0.0", "19.0.0", "20.0.0", "21.0.0", "22.0.0"]
+
+
+def sw_fw(idx):
+    return SW_FW[idx] if 0 <= idx < len(SW_FW) else (f"newer than {SW_FW[-1]}" if idx >= len(SW_FW) else "none")
+
+
+def sw_level(keys):
+    """The newest master key the person's keys have (counting up from master_key_00 without a gap), or -1."""
+    i = -1
+    while keys and f"master_key_{i + 1:02x}" in keys:
+        i += 1
+    return i
+
+
+def sw_fw_message(name, idx, level):
+    return (f"{name} was made for Switch firmware {sw_fw(idx)} or newer, but your keys only go as far as firmware {sw_fw(level)}"
+            if level >= 0 else f"{name} needs master keys, and your keys have none") + \
+        f", so it can't be converted. Use a prod.keys from a console that is updated to firmware {sw_fw(idx)} or newer, then try again " \
+        "(or leave that file out)"
+
+
 def sw_need(keys, *names):
+    for n in names:
+        if re.fullmatch(r"master_key_[0-9a-f]{2}", n) and (not keys or n not in keys):
+            raise SwitchKeyError(sw_fw_message("this game", int(n[-2:], 16), sw_level(keys)))
     miss = [n for n in names if not keys or n not in keys]
     if miss:
         raise SwitchKeyError("your keys are missing " + ", ".join(miss[:4]) + (" and more" if len(miss) > 4 else "") +
@@ -6082,8 +6119,10 @@ def sw_master(keys, index):
 
 
 def sw_title_kek(keys, rev):
-    sw_need(keys, f"master_key_{rev:02x}", "titlekek_source")
-    return aes_ecb(sw_master(keys, rev), True)(keys["titlekek_source"])
+    """The key a ticket's title key is locked with. `rev` is the generation number the ticket carries (13 means master_key_0c)."""
+    idx = max(rev - 1, 0)
+    sw_need(keys, f"master_key_{idx:02x}", "titlekek_source")
+    return aes_ecb(sw_master(keys, idx), True)(keys["titlekek_source"])
 
 
 def sw_area_key(keys, gen, slot):
@@ -6152,6 +6191,21 @@ def xci_files(path):
             if name == "secure":
                 return [(n, o, s) for n, o, s, _ in hfs0_list(f, off)]
     raise ValueError("has no 'secure' part, so there is no game in it")
+
+
+def xci_gen(path, keys):
+    """The newest firmware an XCI's files were made for (a master key number), or None when that can't be read."""
+    if not keys or "header_key" not in keys:
+        return None
+    best = -1
+    try:
+        with open(path, "rb") as f:
+            for n, o, s in xci_files(path):
+                if n.lower().endswith(".nca"):
+                    best = max(best, sw_nca_head(f, o, keys)[0]["gen"] - 1)
+    except (ValueError, OSError, SwitchKeyError):
+        return None
+    return best
 
 
 def sw_tik(data):
@@ -6275,17 +6329,21 @@ def nsp_info(path, keys=None):
                 except ValueError:
                     pass
         info = {"path": path, "size": path.stat().st_size, "files": files, "ncas": ncas, "tiks": tiks, "ticketed": bool(tiks),
-                "kind": "", "tid": 0, "base": 0, "version": 0, "title_keys": {}}
+                "kind": "", "tid": 0, "base": 0, "version": 0, "title_keys": {}, "gen_idx": None, "key_idx": None}
         m = re.search(r"\[v(\d+)\]", path.name)
         if m:
             info["version"] = int(m.group(1))
         if keys and "header_key" in keys:
+            info["gen_idx"], info["key_idx"] = -1, -1
             for nm, o, sz in ncas:
                 try:
                     hd, h = sw_nca_head(f, o, keys)
                 except (SwitchKeyError, ValueError):
                     continue
-                if hd["ctype"] == 1:                    # the meta NCA says which title this is
+                info["gen_idx"] = max(info["gen_idx"], hd["gen"] - 1)
+                if hd["titlekey"]:
+                    info["key_idx"] = max(info["key_idx"], hd["gen"] - 1)
+                if hd["ctype"] == 1 and not info["tid"]:     # the meta NCA says which title this is
                     tid = hd["tid"]
                     low = tid & 0xFFF
                     info["tid"] = tid
@@ -6298,7 +6356,6 @@ def nsp_info(path, keys=None):
                         mt = None
                     if mt and mt[0] == tid and mt[1] > info["version"]:
                         info["version"] = mt[1]
-                    break
     return info
 
 
@@ -6313,6 +6370,10 @@ def sw_plan(nsps, keys, latest_only=True):
             keep[(i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)] = i
         use = [i for i in use if keep.get((i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)) is i]
     plan, seen = [], set()
+    level = sw_level(keys)
+    for i in use:
+        if i["ticketed"] and i["key_idx"] is not None and i["key_idx"] > level:
+            raise SwitchKeyError(sw_fw_message(i["path"].name, i["key_idx"], level))
     for i in use:
         with open(i["path"], "rb") as f:
             for nm, o, sz in i["ncas"]:
@@ -10955,7 +11016,8 @@ class App:
         SWITCH_KEYS[0] = parse_switch_keys(self.v["switch_keys"].get())
         if hasattr(self, "sw_status"):
             k = SWITCH_KEYS[0]
-            self.sw_status.config(text=(f"✓ Keys are set ({len(k)} kept)." + ("" if "header_key" in k else " The header_key line is missing, so they can't be used.")) if k
+            self.sw_status.config(text=(f"✓ Keys are set ({len(k)} kept). They open games made for Switch firmware up to {sw_fw(sw_level(k))}." +
+                                        ("" if "header_key" in k else " The header_key line is missing, so they can't be used.")) if k
                                   else "Keys: not set. Games without a ticket convert without them.")
         if hasattr(self, "rpcs3_status"):
             self.rpcs3_status.config(text=(f"✓ RPCS3 found: {RPCS3[0]}" if RPCS3[0] else "RPCS3: not set yet.") + "   " +
