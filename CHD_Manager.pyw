@@ -2300,6 +2300,11 @@ class CisoDisc(DiscImage):
             count += v == 1
         last = max((i for i, v in enumerate(self.pos) if v is not None), default=-1)
         self.size = (last + 1) * self.block
+        head = self.read(0, 0x20)                       # the file only holds whole blocks, but a real disc ends part-way through the last one:
+        for std in ((1459978240,) if head[0x1C:0x20] == bytes.fromhex("C2339F3D") else    # a GameCube disc is exactly this big,
+                    (4699979776, 8511160320) if head[0x18:0x1C] == bytes.fromhex("5D1C9EA3") else ()):    # a Wii disc one of these two
+            if self.size - self.block < std <= self.size:
+                self.size = std
 
     def read(self, off, n):
         out = []
