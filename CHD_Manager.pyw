@@ -9754,10 +9754,10 @@ class App:
                                                                "and show it where rpcs3.exe is, or give it your key")
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
-        if all(i["patch"] for i in job.pkgs):
-            job.status, job.result = "Failed (no game)", "only an update was added. Add the game's own package too (the one that isn't an update)"
-            self.post("log", f"{job.path.name}: {job.result}", "err")
-            return
+        only_updates = all(i["patch"] for i in job.pkgs)
+        if only_updates:                                    # RPCS3 itself installs these without the game, so they are unpacked too
+            self.post("log", f"{job.path.name}: only updates were added, so the result holds just the files the updates carry, not the whole game. "
+                             "Add the game's own package as well to get the whole game.", "warn")
         out, skip = self.folder_target(job, o)
         if skip:
             return
@@ -9839,7 +9839,7 @@ class App:
             if not ok:
                 shutil.rmtree(out, ignore_errors=True)
         if ok:
-            job.note = f"{n} packages merged" if n > 1 else ""
+            job.note = "; ".join(x for x in (f"{n} packages merged" if n > 1 else "", "updates only: not the whole game" if only_updates else "") if x)
             self.folder_finish(job, out)
             self.post("log", "The package sources were kept (a package has no checksum to prove the copy against). No licence (RAP) is needed to unpack; "
                              "keep yours for playing.", "info")
@@ -9893,7 +9893,7 @@ class App:
             if not ok:
                 shutil.rmtree(out, ignore_errors=True)
         if ok:
-            job.note = (f"{n} packages merged" if n > 1 else "")
+            job.note = "; ".join(x for x in (f"{n} packages merged" if n > 1 else "", "updates only: not the whole game" if all(i["patch"] for i in job.pkgs) else "") if x)
             self.folder_finish(job, out)
             if n > 1 and self.verify_wanted():
                 self.post("log", "The game package was read back and checked; the updates written over it were not (they change files the check "
