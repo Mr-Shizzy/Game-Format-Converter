@@ -5100,12 +5100,12 @@ def _xiso_dir_plan(d):
     d.tsize = max(XISO_SECTOR, (pos + XISO_SECTOR - 1) // XISO_SECTOR * XISO_SECTOR)
 
 
-def _xiso_dir_bytes(d):
+def _xiso_dir_bytes(d, file_attr=0x20):
     out = bytearray(b"\xff" * d.tsize)
     for n in d.order:
         left = n.left.pos // 4 if n.left else 0
         right = n.right.pos // 4 if n.right else 0
-        e = struct.pack("<HHIIBB", left, right, n.sector, n.tsize if n.is_dir else n.size, 0x10 if n.is_dir else 0x20, len(n.name)) + n.name
+        e = struct.pack("<HHIIBB", left, right, n.sector, n.tsize if n.is_dir else n.size, 0x10 if n.is_dir else file_attr, len(n.name)) + n.name
         out[n.pos:n.pos + len(e)] = e
     return bytes(out)
 
@@ -5137,7 +5137,7 @@ def xiso_layout(root):
     return items, nxt
 
 
-def build_xiso(entries, out_path, read, progress=lambda x: None, stopped=lambda: False):
+def build_xiso(entries, out_path, read, progress=lambda x: None, stopped=lambda: False, file_attr=0x20):
     """Write an XISO of `entries` [(path parts, is_file, src, size)]; read(src, size) yields each file's bytes in pieces."""
     root = xiso_tree(entries)
     items, sectors = xiso_layout(root)
@@ -5162,7 +5162,7 @@ def build_xiso(entries, out_path, read, progress=lambda x: None, stopped=lambda:
         for n in items:
             zeros(n.sector * XISO_SECTOR)
             if n.is_dir:
-                g.write(_xiso_dir_bytes(n))
+                g.write(_xiso_dir_bytes(n, file_attr))
                 pos += n.tsize
             else:
                 wrote = 0
@@ -11543,7 +11543,8 @@ class App:
         ents, read, close = self.xbox_source(job)
         try:
             span = 0.45 if verify else 0.9
-            build_xiso(ents, dest, read, lambda x: prog(0.1 + x * span), stop)
+            build_xiso(ents, dest, read, lambda x: prog(0.1 + x * span), stop,
+                       file_attr=0x80 if job.platform == "Xbox" else 0x20)       # an original Xbox disc marks its files 'normal' (0x80), like the dumps do
             if verify:
                 self.post("log", "Reading the new disc image back against the source…", "info")
                 e2, r2, c2 = iso_source(dest)
