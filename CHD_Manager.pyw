@@ -4581,7 +4581,7 @@ class Job:
             except UnpackError as e:
                 raise ValueError(str(e)) from None
             close()
-            self.container, self.platform, self.types = "nup", "Switch", ["MODE1"]
+            self.container, self.platform, self.types = "nup", "Switch 2", ["MODE1"]     # the format can also hold a Switch 1 dump, but its header says nothing about which; in practice it is Switch 2
             self.zar_raw = sum(x["size"] for x in nfiles)
             self.size, self.src_files = p.stat().st_size, [p]
             self.auto_type = "DVD"
