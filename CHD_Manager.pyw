@@ -4568,7 +4568,7 @@ class Job:
         if p.is_dir() and nup_bundle(p) is not None:           # a decrypted Switch game (exefs/romfs, with its updates and extra content): can become a NUP
             pkgs = nup_bundle(p)
             tree = [t for x in pkgs for t in nup_tree(x["root"])]
-            self.container, self.platform, self.types = "swfolder", "Switch", ["MODE1"]
+            self.container, self.platform, self.types = "swfolder", nup_folder_console(pkgs) or "Switch", ["MODE1"]
             self.zar_raw = sum(t[2] for t in tree)
             self.size, self.src_files = self.zar_raw, [p]
             u, d = sum(1 for x in pkgs if x["kind"] == 1), sum(1 for x in pkgs if x["kind"] == 2)
@@ -4582,7 +4582,7 @@ class Job:
             except UnpackError as e:
                 raise ValueError(str(e)) from None
             close()
-            self.container, self.platform, self.types = "nup", "Switch 2", ["MODE1"]     # the format can also hold a Switch 1 dump, but its header says nothing about which; in practice it is Switch 2
+            self.container, self.platform, self.types = "nup", nup_file_console(p) or "Switch 2", ["MODE1"]     # the NUP header itself doesn't say; its main.npdm does (when it can't tell, these are in practice Switch 2)
             self.zar_raw = sum(x["size"] for x in nfiles)
             self.size, self.src_files = p.stat().st_size, [p]
             self.auto_type = "DVD"
@@ -6709,6 +6709,58 @@ def nup_folder_ok(p):
     return p.is_dir() and (p / "exefs").is_dir() and (p / "romfs").is_dir() and ((p / "exefs" / "main").is_file() or (p / "exefs" / "main.npdm").is_file())
 
 
+def npdm_console(b):
+    """'Switch' or 'Switch 2' from the bytes of a main.npdm, or '' when it can't tell. The program's access-control block (ACID) starts with a
+    signature: 0x200 bytes long on Switch 1 programs and 0x300 on Switch 2 ones, so its 'ACID' mark is found at a different place.
+    (Checked on three Switch 1 programs and one Switch 2 game; a guess from that, not a documented rule.)"""
+    if len(b) < 0x80 or b[:4] != b"META":
+        return ""
+    off = struct.unpack("<I", b[0x78:0x7C])[0]
+    if b[off + 0x200:off + 0x204] == b"ACID":
+        return "Switch"
+    if b[off + 0x300:off + 0x304] == b"ACID":
+        return "Switch 2"
+    return ""
+
+
+def nup_folder_console(pkgs):
+    """The console a game folder's programs are for, read from the first main.npdm that says."""
+    for x in pkgs:
+        try:
+            c = npdm_console((Path(x["root"]) / "exefs" / "main.npdm").read_bytes()[:0x2000])
+        except OSError:
+            c = ""
+        if c:
+            return c
+    return ""
+
+
+def nup_file_console(path):
+    """The same for a .nup file, from the main.npdm stored in its first package's meta block ('' when it can't tell)."""
+    try:
+        pk, _files, _tree, _rf, close = nup_open(path)
+        try:
+            with open(path, "rb") as f:
+                for x in pk:
+                    mo, ms = x["meta"]
+                    if ms >= 8 and mo:
+                        f.seek(mo)
+                        blk = f.read(ms)
+                        o = 0
+                        while o + 8 <= len(blk):
+                            ty, _r, sz = struct.unpack("<HHI", blk[o:o + 8])
+                            if ty == 1:
+                                c = npdm_console(blk[o + 8:o + 8 + min(sz, 0x2000)])
+                                if c:
+                                    return c
+                            o += 8 + sz
+        finally:
+            close()
+    except (UnpackError, OSError, struct.error):
+        pass
+    return ""
+
+
 def nup_npdm_id(folder):
     """The title id inside a folder's exefs/main.npdm (the ACI0 block), or None."""
     try:
@@ -6822,7 +6874,7 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
         raise UnpackError("the folder has no files in it")
     dirs = {}
     for pi, x in enumerate(pkgs):
-        dirs[(pi,)] = {"name": f"{x['tid']:016x}", "dirs": set(), "files": []}
+        dirs[(pi,)] = {"name": "", "dirs": set(), "files": []}
     for pi, parts, fp, size in allf:
         for k in range(1, len(parts)):
             key = (pi,) + parts[:k]
@@ -8106,7 +8158,7 @@ class App:
         self.out_entry = ttk.Entry(sv, textvariable=self.v["out_dir"])
         self.out_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         ttk.Button(sv, text="Browse…", command=self.pick_out_dir).pack(side="left")
-        ttk.Checkbutton(sv, text="keep the folders' layout", variable=self.v["keep_structure"]).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(sv, text="keep sub-folders (when adding a folder full of games)", variable=self.v["keep_structure"]).pack(side="left", padx=(12, 0))
         self.start_btn = ttk.Button(act, text="▶  Start", style="Accent.TButton", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(act, text="■  Stop", command=self.stop, state="disabled")
