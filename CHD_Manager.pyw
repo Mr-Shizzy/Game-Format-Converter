@@ -4707,6 +4707,15 @@ class Job:
         else:
             refs = [p]
             self.lone_bin = ext == ".bin"
+            sz0 = p.stat().st_size
+            if sz0 == 0:
+                raise ValueError("this file is empty")
+            if sz0 < 2048:
+                raise ValueError(f"this file is only {sz0} bytes, far too small to be a disc image (a disc is made of sectors of 2048 or 2352 bytes)")
+            if ext == ".bin" and sz0 % 2352 and sz0 % 2048 and not sniff_raw_image(p):
+                raise ValueError("this file's size isn't a whole number of disc sectors (2048 or 2352 bytes), so it isn't a disc image, or it is cut short")
+        if ext in (".cue", ".gdi", ".toc") and not refs:
+            raise ValueError(f"this doesn't look like a {ext[1:].upper()} sheet: it doesn't list any tracks")
         self.src_files = [p] + [r for r in refs if r != p]
         self.missing = [r.name for r in refs if not r.exists()]
         self.size = sum(f.stat().st_size for f in self.src_files if f.exists())
@@ -10027,6 +10036,7 @@ class App:
 
     def run_all(self, todo, o):
         self.cur_opts = o
+        self.run_claimed = set()
         t0 = time.time()
         stats = {"ok": 0, "fail": 0, "skip": 0, "src": 0, "out": 0}
         total = len(todo)
@@ -10185,10 +10195,28 @@ class App:
                         f"but only {fmt_size(free)} is free. Free up some room or choose another Output folder." + bin_note)
         return None
 
+    def claim_output(self, out):
+        """Remembers an output made in this run. A second item that would get the same name is a different game, so it is numbered instead of
+        replacing (or being skipped for) the first one, whatever 'If output exists' says."""
+        claimed = self.__dict__.setdefault("run_claimed", set())
+        out = Path(out)
+        if str(out).lower() in claimed:
+            n = 1
+            while True:
+                cand = out.with_name(f"{out.stem} ({n}){out.suffix}")
+                if str(cand).lower() not in claimed and not cand.exists():
+                    out = cand
+                    break
+                n += 1
+        claimed.add(str(out).lower())
+        return out
+
     def handle_exists(self, job, out, o):
         """-> (out, force, skip)"""
+        if str(out).lower() in self.__dict__.setdefault("run_claimed", set()):
+            return self.claim_output(out), False, False
         if not out.exists():
-            return out, False, False
+            return self.claim_output(out), False, False
         mode = o["exists"]
         if mode == "Skip":
             job.status = "Skipped (exists)"
@@ -10199,10 +10227,10 @@ class App:
             n = 1
             while True:
                 cand = out.with_name(f"{out.stem} ({n}){out.suffix}")
-                if not cand.exists():
-                    return cand, False, False
+                if not cand.exists() and str(cand).lower() not in self.run_claimed:
+                    return self.claim_output(cand), False, False
                 n += 1
-        return out, True, False
+        return self.claim_output(out), True, False
 
     def comp_args(self, o, typ):
         c = o["compression"]
@@ -11562,6 +11590,13 @@ class App:
         Returns (folder, skip); an existing one is skipped, replaced or numbered as 'If output exists' says."""
         stem = self.output_path(job, o, ".x").stem
         out = self.output_path(job, o, ".x").parent / stem
+        claimed = self.__dict__.setdefault("run_claimed", set())
+        if str(out).lower() in claimed:                        # an earlier item of this run already made a folder with this name: a different game
+            k = 1
+            while str(out.with_name(f"{stem} ({k})")).lower() in claimed or out.with_name(f"{stem} ({k})").exists():
+                k += 1
+            stem = f"{stem} ({k})"
+            out = out.with_name(stem)
         if out.exists() and any(out.iterdir()):
             if o["exists"] == "Skip":
                 job.status, job.result = "Skipped (exists)", f"{out.name} already exists (see 'If output exists' in Settings)"
@@ -11574,6 +11609,7 @@ class App:
                 out = out.with_name(f"{stem} ({k})")
             else:
                 shutil.rmtree(out, ignore_errors=True)
+        claimed.add(str(out).lower())
         return out, False
 
     def folder_finish(self, job, out):
