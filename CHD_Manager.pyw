@@ -4218,7 +4218,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4393,10 +4393,12 @@ class Job:
             return [("pkg", target_label("pkg"))]
         if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
             return [("folder", target_label("folder"))]
-        if self.container == "swnsp":               # Switch packages (a game, its newest update, extra content): one cartridge image
-            return [("xci", target_label("xci"))]
-        if self.container == "swxci":               # a Switch cartridge image: a package of its files
-            return [("nsp", target_label("nsp"))]
+        if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, or one package per title
+            titles = [t for i in self.nsps for t in i["titles"]]
+            keys = ["xci", "nsp"] if len(self.nsps) > 1 else ["xci"] if self.container == "swnsp" else ["nsp"]
+            if len(titles) > 1 and all(t["kind"] for t in titles):
+                keys.append("split")
+            return [(k, target_label(k)) for k in keys]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
         if self.ps3:                                # a PS3 disc image: a CHD of it, or its files (not while they are still encrypted)
@@ -4531,23 +4533,12 @@ class Job:
                              "disc key. It can still be joined into one ISO, or become a CHD, which store it exactly as it is")
             return
         if ext in (".nsp", ".xci") and not p.is_dir():
-            if ext == ".xci":
-                files = xci_files(p)
-                self.container, self.platform, self.types = "swxci", "Switch", ["MODE1"]
-                self.size, self.src_files = p.stat().st_size, [p]
-                self.auto_type, self.reason = "DVD", f"Switch cartridge image ({len(files)} files)"
-                g = xci_gen(p, SWITCH_KEYS[0])
-                if g is not None and g >= 0:
-                    self.reason += f", made for firmware {sw_fw(g)}+"
-                return
             info = nsp_info(p, SWITCH_KEYS[0])
-            self.container, self.platform, self.types = "swnsp", "Switch", ["MODE1"]
+            self.container, self.platform, self.types = "swxci" if ext == ".xci" else "swnsp", "Switch", ["MODE1"]
             self.nsps = [info]
             self.size, self.src_files = info["size"], [p]
             self.auto_type = "DVD"
-            self.reason = {"base": "Switch game", "update": "Switch update", "dlc": "Switch extra content"}.get(info["kind"], "Switch package")
-            if info["gen_idx"] is not None and info["gen_idx"] >= 0:
-                self.reason += f", made for firmware {sw_fw(info['gen_idx'])}+"
+            self.reason = sw_reason(self.nsps)
             if info["ticketed"] and info["key_idx"] is not None and info["key_idx"] > sw_level(SWITCH_KEYS[0]):
                 self.warn = sw_fw_message("it", info["key_idx"], sw_level(SWITCH_KEYS[0]))
             elif info["ticketed"] and not SWITCH_KEYS[0]:
@@ -4747,20 +4738,15 @@ class Job:
         self._raw = None
 
     def add_nsp(self, other):
-        """Another Switch package for the same game (its update or extra content, or the game itself) joins this item."""
+        """Another Switch file for the same game (an update, extra content, or the game itself) joins this item."""
         self.nsps += other.nsps
-        self.nsps.sort(key=lambda i: ({"base": 0, "": 0, "update": 1, "dlc": 2}.get(i["kind"], 0), i["tid"], i["version"], i["path"].name))
+        self.nsps.sort(key=lambda i: (SW_KIND_RANK.get(i["kind"], 0), i["tid"], i["version"], i["path"].name))
         self.src_files = [i["path"] for i in self.nsps]
         base = next((i for i in self.nsps if i["kind"] in ("base", "")), None)
         if base is not None:
             self.path = self.home = base["path"]
         self.size = sum(i["size"] for i in self.nsps)
-        ups, dlcs = sum(1 for i in self.nsps if i["kind"] == "update"), sum(1 for i in self.nsps if i["kind"] == "dlc")
-        extra = ([f"{ups} update{'s' if ups != 1 else ''}"] if ups else []) + ([f"{dlcs} extra content"] if dlcs else [])
-        self.reason = "Switch game" + (" with " + " and ".join(extra) if extra else "")
-        gens = [i["gen_idx"] for i in self.nsps if i["gen_idx"] is not None]
-        if gens and max(gens) >= 0:
-            self.reason += f", made for firmware {sw_fw(max(gens))}+"
+        self.reason = sw_reason(self.nsps)
         self._raw = None
 
     def row(self):
@@ -6057,9 +6043,9 @@ def switch_keys_text(keys):
     return "\n".join(f"{k}={v.hex()}" for k, v in sorted(keys.items())) if keys else ""
 
 
-# the Switch firmware each master key goes with (master_key_00, _01, ...); a key past the end of this list is from a newer firmware than this program knows
+# the Switch firmware each master key goes with (master_key_00, _01, ...; checked against the Switchbrew NCA page's KeyGeneration table, 10 Sep 2026, where the generation is the key number + 1); a key past the end of this list is from a newer firmware than this program knows
 SW_FW = ["1.0.0", "3.0.0", "3.0.1", "4.0.0", "5.0.0", "6.0.0", "6.2.0", "7.0.0", "8.1.0", "9.0.0", "9.1.0", "12.1.0", "13.0.0", "14.0.0", "15.0.0",
-         "16.0.0", "17.0.0", "18.0.0", "19.0.0", "20.0.0", "21.0.0", "22.0.0"]
+         "16.0.0", "17.0.0", "18.0.0", "19.0.0", "20.0.0", "21.0.0", "22.0.0", "23.0.0"]
 
 
 def sw_fw(idx):
@@ -6284,7 +6270,7 @@ def sw_content_key(f, off, hd, h, keys, tiks):
 
 
 def sw_meta(f, off, h, hd, key):
-    """(title id, version, type) from the cnmt inside a meta NCA, or None."""
+    """(title id, version, type, [content ids]) from the cnmt inside a meta NCA, or None. The content ids name the NCA files that belong to the title."""
     for idx in range(4):
         st = sw_pfs0_start(h, idx)
         if st is None:
@@ -6300,83 +6286,154 @@ def sw_meta(f, off, h, hd, key):
             o, sz, so, _r = struct.unpack("<QQII", body[24 * i:24 * i + 24])
             nm = body[24 * n + so:].split(b"\0", 1)[0]
             if nm.endswith(b".cnmt") and sz >= 0x20:
-                c = sw_section_read(f, off, h, idx, key, st + 16 + 24 * n + strsz + o, 0x20)
-                return struct.unpack("<Q", c[:8])[0], struct.unpack("<I", c[8:12])[0], c[12]
+                c = sw_section_read(f, off, h, idx, key, st + 16 + 24 * n + strsz + o, min(sz, 0x10000))
+                ids = []
+                ext, count = struct.unpack("<H", c[0xE:0x10])[0], struct.unpack("<H", c[0x10:0x12])[0]
+                for k in range(count):
+                    r = c[0x20 + ext + 0x38 * k:0x20 + ext + 0x38 * k + 0x38]
+                    if len(r) == 0x38:
+                        ids.append(r[0x20:0x30].hex())
+                return struct.unpack("<Q", c[:8])[0], struct.unpack("<I", c[8:12])[0], c[12], ids
     return None
 
 
+SW_KIND_RANK = {"base": 0, "": 0, "update": 1, "dlc": 2}
+
+
 def nsp_info(path, keys=None):
-    """What is in an NSP. Without keys that's its files; with them also what it is (the game, an update or extra content), its version and
-    whether it needs the keys to convert. -> dict (raises ValueError with a plain reason)."""
+    """What is in an NSP or an XCI. Without keys that's its files; with them also which titles it holds (the game, updates, extra content), their
+    versions, and the firmware they were made for. -> dict (raises ValueError with a plain reason)."""
     path = Path(path)
+    is_xci = path.suffix.lower() == ".xci"
     with open(path, "rb") as f:
         try:
-            files = pfs0_list(f)
+            files = xci_files(path) if is_xci else pfs0_list(f)
         except ValueError as e:
             raise ValueError(f"this {e}") from None
         ncas = [x for x in files if x[0].lower().endswith(".nca")]
         if not ncas:
-            raise ValueError("this package has no game files in it (no .nca files)")
-        tiks = {}
+            raise ValueError("this has no game files in it (no .nca files)")
+        tiks, tikfiles = {}, {}
+        byname = {n.lower(): (n, o, sz) for n, o, sz in files}
         for nm, o, sz in files:
             if nm.lower().endswith(".tik") and sz < 0x1000:
                 f.seek(o)
                 try:
                     t = sw_tik(f.read(sz))
                     tiks[t[0]] = t
+                    cert = byname.get(nm.lower()[:-4] + ".cert")
+                    tikfiles[t[0]] = [(nm, o, sz)] + ([cert] if cert else [])
                 except SwitchKeyError:
                     tiks[None] = None
                 except ValueError:
                     pass
-        info = {"path": path, "size": path.stat().st_size, "files": files, "ncas": ncas, "tiks": tiks, "ticketed": bool(tiks),
-                "kind": "", "tid": 0, "base": 0, "version": 0, "title_keys": {}, "gen_idx": None, "key_idx": None}
-        m = re.search(r"\[v(\d+)\]", path.name)
-        if m:
-            info["version"] = int(m.group(1))
+        info = {"path": path, "size": path.stat().st_size, "files": files, "ncas": ncas, "tiks": tiks, "tikfiles": tikfiles, "ticketed": bool(tiks),
+                "xci": is_xci, "kind": "", "tid": 0, "base": 0, "version": 0, "gen_idx": None, "key_idx": None, "titles": []}
+        fv = re.search(r"\[v(\d+)\]", path.name)
+        fver = int(fv.group(1)) if fv else 0
+        info["version"] = fver
+        pseudo = {"kind": "", "tid": 0, "base": 0, "version": fver, "type": 0, "ncas": list(ncas), "rights": set(tiks) - {None}, "gen_idx": None, "key_idx": None}
+        info["titles"] = [pseudo]
         if keys and "header_key" in keys:
             info["gen_idx"], info["key_idx"] = -1, -1
+            heads, titles = {}, []
             for nm, o, sz in ncas:
                 try:
                     hd, h = sw_nca_head(f, o, keys)
                 except (SwitchKeyError, ValueError):
                     continue
+                heads[nm.lower()] = (hd, h)
                 info["gen_idx"] = max(info["gen_idx"], hd["gen"] - 1)
                 if hd["titlekey"]:
                     info["key_idx"] = max(info["key_idx"], hd["gen"] - 1)
-                if hd["ctype"] == 1 and not info["tid"]:     # the meta NCA says which title this is
+                if hd["ctype"] == 1:                    # a meta NCA: one title (the game, an update or extra content)
                     tid = hd["tid"]
                     low = tid & 0xFFF
-                    info["tid"] = tid
-                    info["kind"] = "base" if low == 0 else "update" if low == 0x800 else "dlc"
-                    info["base"] = tid if low == 0 else (tid & ~0xFFF) if low == 0x800 else ((tid >> 12) - 1) << 12
+                    t = {"kind": "base" if low == 0 else "update" if low == 0x800 else "dlc", "tid": tid, "version": 0, "type": 0, "ncas": [(nm, o, sz)],
+                         "base": tid if low == 0 else (tid & ~0xFFF) if low == 0x800 else ((tid >> 12) - 1) << 12, "rights": set(), "ids": [],
+                         "gen_idx": None, "key_idx": None}
                     try:
-                        key = sw_content_key(f, o, hd, h, keys, tiks)
-                        mt = sw_meta(f, o, h, hd, key)
+                        mt = sw_meta(f, o, h, hd, sw_content_key(f, o, hd, h, keys, tiks))
                     except (SwitchKeyError, ValueError, struct.error):
                         mt = None
-                    if mt and mt[0] == tid and mt[1] > info["version"]:
-                        info["version"] = mt[1]
+                    if mt and mt[0] == tid:
+                        t["version"], t["type"], t["ids"] = mt[1], mt[2], mt[3]
+                    titles.append(t)
+            if titles:
+                by = {n.lower(): (n, o, sz) for n, o, sz in ncas}
+                claimed = {t["ncas"][0][0].lower() for t in titles}
+                for t in titles:
+                    for cid in t["ids"]:
+                        x = by.get(cid + ".nca") or by.get(cid + ".cnmt.nca")
+                        if x and x[0].lower() not in claimed:
+                            t["ncas"].append(x)
+                            claimed.add(x[0].lower())
+                titles.sort(key=lambda t: (SW_KIND_RANK[t["kind"]], t["tid"]))
+                home = next((t for t in titles if t["kind"] == "base"), titles[0])
+                for nm, o, sz in ncas:                  # anything no title lists stays with the game, so nothing is lost
+                    if nm.lower() not in claimed:
+                        home["ncas"].append((nm, o, sz))
+                for t in titles:
+                    g = [heads[n.lower()][0] for n, _o, _s in t["ncas"] if n.lower() in heads]
+                    t["gen_idx"] = max([x["gen"] - 1 for x in g], default=-1)
+                    t["key_idx"] = max([x["gen"] - 1 for x in g if x["titlekey"]], default=-1)
+                    t["rights"] = {x["rights"] for x in g if x["titlekey"]}
+                    if len(titles) == 1 and not t["version"]:
+                        t["version"] = fver
+                info["titles"] = titles
+                info["kind"], info["tid"], info["base"], info["version"] = home["kind"], home["tid"], home["base"], home["version"]
     return info
 
 
-def sw_plan(nsps, keys, latest_only=True):
-    """The NCA files that go into an XCI from NSP infos (game first, then update, then extra content) ->
-    [(nsp path, name, offset, size, rewrite)] where rewrite is None (copied as it is) or (new 0xC00 header bytes). Raises SwitchKeyError."""
-    order = {"base": 0, "": 0, "update": 1, "dlc": 2}
-    use = sorted(nsps, key=lambda i: (order.get(i["kind"], 0), i["tid"], i["version"]))
-    if latest_only:                                           # a Switch update is a patch against the game, so only the newest of each is needed
-        keep = {}
-        for i in use:
-            keep[(i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)] = i
-        use = [i for i in use if keep.get((i["kind"], i["tid"]) if i["kind"] in ("update", "dlc") else id(i)) is i]
+def sw_reason(infos):
+    """A short sentence for the list: what the item holds, and the firmware it was made for."""
+    ts = [t for i in infos for t in i["titles"]]
+    one_xci = len(infos) == 1 and infos[0]["xci"]
+    if all(t["kind"] for t in ts):
+        b, u, d = (sum(1 for t in ts if t["kind"] == k) for k in ("base", "update", "dlc"))
+        extra = ([f"{u} update{'s' if u != 1 else ''}"] if u else []) + ([f"{d} extra content"] if d else [])
+        text = "Switch game" + (" with " + " and ".join(extra) if extra else "") if b else "Switch " + " and ".join(extra)
+        if one_xci:
+            text += f" (cartridge image, {len(infos[0]['ncas'])} files)"
+    else:
+        text = f"Switch cartridge image ({len(infos[0]['ncas'])} files)" if one_xci else "Switch package"
+    gens = [i["gen_idx"] for i in infos if i["gen_idx"] is not None]
+    if gens and max(gens) >= 0:
+        text += f", made for firmware {sw_fw(max(gens))}+"
+    return text
+
+
+def sw_select(infos, latest_only=True):
+    """Which titles go into the result: the game, then updates, then extra content. When the same title is in more than one place (an update in an
+    XCI and a newer one added beside it), the newest version is the one used; on a tie the one added last wins. -> (chosen [(info, title)], left out [(info, title)])."""
+    best, order = {}, []
+    for info in infos:
+        for t in info["titles"]:
+            key = (t["kind"], t["tid"]) if t["kind"] else ("", id(t))
+            if not latest_only:
+                key = key + (t["version"], id(t))
+            old = best.get(key)
+            if old is None:
+                order.append(key)
+            if old is None or t["version"] >= old[1]["version"]:
+                best[key] = (info, t)
+    chosen = sorted(best.values(), key=lambda x: (SW_KIND_RANK[x[1]["kind"]], x[1]["tid"], x[1]["version"]))
+    keep = {id(t) for _i, t in chosen}
+    return chosen, [(i, t) for i in infos for t in i["titles"] if id(t) not in keep]
+
+
+def sw_plan(infos, keys, latest_only=True):
+    """The NCA files that go into an XCI from NSP/XCI infos (game first, then update, then extra content) ->
+    [(source path, name, offset, size, rewrite)] where rewrite is None (copied as it is) or (new 0xC00 header bytes). Raises SwitchKeyError."""
+    chosen, _left = sw_select(infos, latest_only)
     plan, seen = [], set()
     level = sw_level(keys)
-    for i in use:
-        if i["ticketed"] and i["key_idx"] is not None and i["key_idx"] > level:
-            raise SwitchKeyError(sw_fw_message(i["path"].name, i["key_idx"], level))
-    for i in use:
+    for i, t in chosen:
+        if i["ticketed"] and t["key_idx"] is not None and t["key_idx"] > level:
+            raise SwitchKeyError(sw_fw_message(i["path"].name, t["key_idx"], level))
+    for i, t in chosen:
         with open(i["path"], "rb") as f:
-            for nm, o, sz in i["ncas"]:
+            for nm, o, sz in t["ncas"]:
                 if nm in seen:
                     continue
                 seen.add(nm)
@@ -6385,10 +6442,10 @@ def sw_plan(nsps, keys, latest_only=True):
                     sw_need(keys, "header_key")
                     hd, h = sw_nca_head(f, o, keys)
                     if hd["titlekey"]:
-                        t = i["tiks"].get(hd["rights"])
-                        if t is None:
+                        tk_ = i["tiks"].get(hd["rights"])
+                        if tk_ is None:
                             raise SwitchKeyError(f"{nm} needs a ticket that {i['path'].name} doesn't hold")
-                        tk = aes_ecb(sw_title_kek(keys, t[2]), True)(t[1])
+                        tk = aes_ecb(sw_title_kek(keys, tk_[2]), True)(tk_[1])
                         ok = sw_check_key(f, o, h, tk)
                         if ok is False:
                             raise SwitchKeyError("the title key from the ticket doesn't open the game's data, so these keys don't match this game")
@@ -6398,6 +6455,31 @@ def sw_plan(nsps, keys, latest_only=True):
                         new = sw_xts(keys["header_key"], bytes(hb), decrypt=False)
                 plan.append((i["path"], nm, o, sz, new))
     return plan
+
+
+def sw_title_files(info, t, seen=None):
+    """[(name, size, source path, offset)] for one title as an NSP holds it: its NCA files, and its ticket and certificate if it came with them."""
+    seen = set() if seen is None else seen
+    out = []
+    for nm, o, sz in t["ncas"]:
+        if nm not in seen:
+            seen.add(nm)
+            out.append((nm, sz, info["path"], o))
+    for r in (info["tikfiles"] if not t["kind"] else t["rights"]):
+        for nm, o, sz in info["tikfiles"].get(r, []):
+            if nm not in seen:
+                seen.add(nm)
+                out.append((nm, sz, info["path"], o))
+    return out
+
+
+def sw_nsp_files(infos, latest_only=True):
+    """All the files of the chosen titles, for one NSP."""
+    chosen, _left = sw_select(infos, latest_only)
+    seen, out = set(), []
+    for i, t in chosen:
+        out += sw_title_files(i, t, seen)
+    return out
 
 
 def _digest(f, off, n, stopped, skip=0):
@@ -8818,7 +8900,7 @@ class App:
             else:
                 jobs_from.append((f, root, None, None))
         have = {str(j.path).lower() for j in self.jobs}
-        have |= {str(x).lower() for j in self.jobs if j.container in ("ps3pkg", "swnsp") for x in j.src_files}
+        have |= {str(x).lower() for j in self.jobs if j.container in ("ps3pkg", "swnsp", "swxci") for x in j.src_files}
         listed = set(have)
         was_empty = not self.jobs
         added = 0
@@ -8837,12 +8919,13 @@ class App:
             if arc:
                 job.archive, job.extract_dir, job.home, job.src_files = arc, tmp, arc.parent / f.name, [arc]
                 self.arc_dirs[tmp] += 1
-            if job.container == "swnsp" and job.nsps[0]["base"]:
-                mate = next((j for j in self.jobs if j.container == "swnsp" and j.nsps[0]["base"] == job.nsps[0]["base"]
+            if job.container in ("swnsp", "swxci") and job.nsps[0]["base"]:
+                mate = next((j for j in self.jobs if j.container in ("swnsp", "swxci") and j.nsps[0]["base"] == job.nsps[0]["base"]
                              and not j.status.startswith("Done")), None)
                 if mate is not None:
                     new = job.nsps[0]
-                    twin = next((i for i in mate.nsps if i["tid"] == new["tid"] and i["version"] == new["version"]), None)
+                    mine = {(t["tid"], t["version"]) for t in new["titles"]}
+                    twin = next((i for i in mate.nsps if mine <= {(t["tid"], t["version"]) for t in i["titles"]}), None)
                     if twin is not None:
                         self.refuse(f.name, sentence(f"it is the same package as {twin['path'].name}, which is already in the list"), "warn")
                         continue
@@ -8850,7 +8933,7 @@ class App:
                     have.add(str(f).lower())
                     added += 1
                     self.refresh_job(mate)
-                    self.log(f"{f.name} is for the same game as {mate.nsps[0]['path'].name}, so they are one item: the game, then its newest update, then its extra content.", "info")
+                    self.log(f"{f.name} is for the same game as {mate.nsps[0]['path'].name}, so they are one item: the game, then its newest update, then its extra content. Where the same update or extra content is in both, the newest version is used.", "info")
                     continue
             if job.container == "ps3pkg":
                 mate = next((j for j in self.jobs if j.container == "ps3pkg" and j.pkgs[0]["title_id"] == job.pkgs[0]["title_id"]
@@ -10006,10 +10089,12 @@ class App:
             return self.do_folder_to_pkg(job, o)
         if t == "folder" and job.container == "ps3pkg":
             return self.do_pkg_to_folder(job, o)
-        if t == "xci" and job.container == "swnsp":
+        if t == "xci" and job.container in ("swnsp", "swxci"):
             return self.do_nsp_to_xci(job, o)
-        if t == "nsp" and job.container == "swxci":
+        if t == "nsp" and job.container in ("swnsp", "swxci"):
             return self.do_xci_to_nsp(job, o)
+        if t == "split" and job.container in ("swnsp", "swxci"):
+            return self.do_sw_split(job, o)
         if t == "folder":
             return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
@@ -10623,7 +10708,7 @@ class App:
         """Switch packages (the game, its newest update, its extra content) -> one XCI cartridge image, using the user's own keys when a game needs them."""
         keys = parse_switch_keys(o.get("switch_keys", ""))
         infos = job.nsps
-        if not any(i["kind"] in ("base", "") for i in infos):
+        if not any(t["kind"] in ("base", "") for i in infos for t in i["titles"]):
             job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP as well, because an XCI needs the game"
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
@@ -10643,11 +10728,9 @@ class App:
         stop = lambda: self.stop_flag  # noqa: E731
         try:
             plan = sw_plan(infos, keys)
-            used = {r[0] for r in plan}
-            for i in infos:
-                if i["path"] not in used:
-                    self.post("log", f"{i['path'].name} was left out: a newer update for the same game is in the list, and a Switch update is a patch against the game itself, "
-                                     "so only the newest is needed. (Make it a separate item if you want it in its own file.)", "info")
+            for i, t in sw_select(infos)[1]:
+                self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one for the same game is in the list, and a Switch "
+                                 "update is a patch against the game itself, so only the newest is needed.", "info")
             build_xci(plan, part, keys, lambda x: prog(x * (0.7 if verify else 1.0)), stop)
             if verify:
                 self.post("log", "Reading the new XCI back against the packages…", "info")
@@ -10675,12 +10758,17 @@ class App:
         if skip:
             return
         part = out.with_name(out.name + ".part")
-        self.post("log", f"\n{job.path.name}  [XCI → NSP]  (the game's files are copied as they are)", "info")
+        self.post("log", f"\n{job.path.name}  [→ NSP]  (the game's files are copied as they are)", "info")
         verify = self.verify_wanted()
         prog = self.cso_progress(job, "Building NSP")
         stop = lambda: self.stop_flag  # noqa: E731
         try:
-            files = [(n, s, job.path, off) for n, off, s in xci_files(job.path)]
+            if len(job.nsps) > 1 and any(t["kind"] == "" for i in job.nsps for t in i["titles"]):
+                raise UnpackError("to put several files together, CHD Manager has to tell the game, its updates and its extra content apart, and that needs your own keys "
+                                  "(Settings, Formats, Nintendo Switch)")
+            for i, t in sw_select(job.nsps)[1]:
+                self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one is in the list.", "info")
+            files = sw_nsp_files(job.nsps)
             build_nsp(files, part, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
             if verify:
                 self.post("log", "Reading the new NSP back against the XCI…", "info")
@@ -10699,6 +10787,59 @@ class App:
             return
         finally:
             part.unlink(missing_ok=True)
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_sw_split(self, job, o):
+        """A Switch XCI or NSP that holds several titles -> a folder with one NSP for the game, one for the update and one for each extra content."""
+        if any(t["kind"] == "" for i in job.nsps for t in i["titles"]):
+            job.status, job.result = "Failed (setup needed)", ("to tell the game, its update and its extra content apart, this needs your own keys: "
+                                                               "Settings, Formats, Nintendo Switch")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        work = out.parent / f".{out.name[:40]}.chdm_split"
+        shutil.rmtree(work, ignore_errors=True)
+        chosen, left = sw_select(job.nsps)
+        stem = re.sub(r"\s*[\[(][^\])]*[\])]", "", job.home.stem).strip() or job.home.stem
+        self.post("log", f"\n{job.path.name}  [→ {len(chosen)} separate NSPs]", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Splitting")
+        stop = lambda: self.stop_flag  # noqa: E731
+        ok = False
+        try:
+            work.mkdir(parents=True)
+            names = set()
+            for k, (i, t) in enumerate(chosen):
+                name = f"{stem} [{t['tid']:016X}][v{t['version']}].nsp"
+                if name in names:
+                    name = name[:-4] + f" ({k}).nsp"
+                names.add(name)
+                files = sw_title_files(i, t)
+                self.post("log", f"{name}  ({t['kind']}, {len(files)} files)", "info")
+                share = lambda x, k=k: prog((k + x * (0.6 if verify else 1.0)) / len(chosen))  # noqa: E731
+                build_nsp(files, work / name, share, stop)
+                if verify:
+                    nsp_verify(work / name, files, lambda x, k=k: prog((k + 0.6 + 0.4 * x) / len(chosen)), stop)
+            os.replace(work, out)
+            ok = True
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if not ok:
+            return
+        self.folder_finish(job, out)
+        self.post("log", f"OK  {out}  ({len(chosen)} packages)", "ok")
         if o["delete_src"] and verify:
             self.remove_sources(job, o)
 
