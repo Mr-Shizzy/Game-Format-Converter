@@ -4255,7 +4255,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ .xiso.iso (trimmed, smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4297,7 +4297,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
 SPACE_RATIO = {"z3ds": 0.8, "chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
-SPACE_EXT = {"cia": ".cia", "z3ds": ".zcci", "unz3ds": ".cci", "xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
+SPACE_EXT = {"xiso": ".xiso.iso", "cia": ".cia", "z3ds": ".zcci", "unz3ds": ".cci", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
              "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
@@ -10701,6 +10701,8 @@ class App:
         else:
             base = job.home.parent
         t = (job.target or "").partition("_d")[0]
+        if ext == ".xiso.iso":
+            stem = re.sub(r"\.xiso$", "", stem, flags=re.I)                  # never 'Game.xiso.xiso.iso'
         if ext == ".cso" and (t == "cso2" or (t == "cso" and job.container == "cso" and job.path.suffix.lower() == ".cso")):
             stem = re.sub(r" \(CSO v[12]\)$", "", stem) + (" (CSO v2)" if t == "cso2" else " (CSO v1)")      # never the source's own name: it would be skipped as existing
         if job.kind == "extract" and (multi or o["extract_subfolder"]):
@@ -11584,10 +11586,11 @@ class App:
         return job.container not in ("zar", "xfolder")
 
     def do_zar_to_iso(self, job, o):
-        dest0 = self.output_path(job, o, ".iso")
+        ext = ".xiso.iso" if job.target == "xiso" else ".iso"
+        dest0 = self.output_path(job, o, ext)
         try:
             if job.path.is_file() and dest0.exists() and os.path.samefile(dest0, job.path):      # an ISO rebuilt next to itself must not replace itself
-                dest0 = dest0.with_name(dest0.stem + " (trimmed).iso")
+                dest0 = dest0.with_name(dest0.name[:-len(ext)] + " (trimmed)" + ext)
         except OSError:
             pass
         out, _, skip = self.handle_exists(job, dest0, o)
