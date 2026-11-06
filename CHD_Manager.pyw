@@ -46,7 +46,7 @@ SETTINGS_FILE = HERE / "chd_manager_settings.json"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".nup", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -4223,7 +4223,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (Switch, experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4266,7 +4266,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
 SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
 
@@ -4355,7 +4355,7 @@ class Job:
                 return sum(chd_logical_size(c) or c.stat().st_size * 3 for c in self.m3u_chds)
             if self.container == "cso":
                 return read_cso_header(p)[0]
-            if self.container == "psnfolder":
+            if self.container in ("psnfolder", "swfolder", "nup"):
                 return self.zar_raw
             if self.container in ("zar", "xfolder", "ps3folder"):
                 return self.zar_raw + 4 * XISO_MODULUS
@@ -4397,6 +4397,10 @@ class Job:
         if self.container == "psnfolder":           # a PSN game folder: a package of it that RPCS3 can install
             return [("pkg", target_label("pkg"))]
         if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
+            return [("folder", target_label("folder"))]
+        if self.container == "swfolder":            # a decrypted Switch game folder: a NUP of it (experimental)
+            return [("nup", target_label("nup"))]
+        if self.container == "nup":                 # a NUP: the folder it holds
             return [("folder", target_label("folder"))]
         if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, or one package per title
             titles = [t for i in self.nsps for t in i["titles"]]
@@ -4560,6 +4564,28 @@ class Job:
             if not RPCS3[0] and not PKG_KEY[0]:
                 self.warn = ("it needs your own RPCS3 or your own package key to be unpacked, and neither is set up yet "
                              "(Settings, Formats, PlayStation 3: show it where rpcs3.exe is, or give it your key)")
+            return
+        if p.is_dir() and nup_folder_ok(p):                    # a decrypted Switch game (exefs and romfs): can become a NUP
+            tree = nup_tree(p)
+            self.container, self.platform, self.types = "swfolder", "Switch", ["MODE1"]
+            self.zar_raw = sum(t[2] for t in tree)
+            self.size, self.src_files = self.zar_raw, [p]
+            self.auto_type, self.reason = "DVD", f"Switch game folder, decrypted ({len(tree)} files)"
+            if nup_title_id(p) is None:
+                self.warn = ("it can't tell which game this is, so it can't be made into a NUP; put the game's 16-digit title id in square brackets "
+                             "in the folder's name, like [0100ABCD12345000]")
+            return
+        if ext == ".nup" and not p.is_dir():
+            try:
+                pk, nfiles, _tree, _rf, close = nup_open(p)
+            except UnpackError as e:
+                raise ValueError(str(e)) from None
+            close()
+            self.container, self.platform, self.types = "nup", "Switch", ["MODE1"]
+            self.zar_raw = sum(x["size"] for x in nfiles)
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.auto_type = "DVD"
+            self.reason = f"NUP file ({', '.join(NUP_KINDS.get(x['kind'], 'package') for x in pk)}; {len(nfiles)} files)"
             return
         if p.is_dir() and psn_folder_info(p) is not None:     # a PSN game as RPCS3 keeps it (PARAM.SFO and USRDIR): can become a package for RPCS3
             ents = ps3_folder_source(p, True)[0]
@@ -6669,6 +6695,337 @@ def build_nsp(files, dest, prog=None, stopped=lambda: False):
             f.close()
 
 
+# ---- Switch 2: NUP, a community container for decrypted game folders (experimental)
+# Written from the public draft "NUP - NX Package Format" 1.0-draft by a55uka (github.com/a55uka/nup). It holds a game's decrypted exefs and romfs
+# folders (and optionally an update and extra content), each file stored raw or as one zstd frame, with a SHA-256 of every file and of the table.
+# It uses no keys and does no decrypting. Nothing here has been tried in an emulator by the author.
+NUP_KINDS = {0: "game", 1: "update", 2: "extra content"}
+
+
+def nup_folder_ok(p):
+    """True for a decrypted Switch game folder: exefs (with main or main.npdm) beside romfs."""
+    p = Path(p)
+    return p.is_dir() and (p / "exefs").is_dir() and (p / "romfs").is_dir() and ((p / "exefs" / "main").is_file() or (p / "exefs" / "main.npdm").is_file())
+
+
+def nup_title_id(folder):
+    """The game's title id: from main.npdm, else from 16 hex digits in the folder's name; None when neither says."""
+    npdm = Path(folder) / "exefs" / "main.npdm"
+    try:
+        b = npdm.read_bytes()[:0x1000]
+        if b[:4] == b"META":
+            off = struct.unpack("<I", b[0x70:0x74])[0]
+            if b[off:off + 4] == b"ACI0":
+                tid = struct.unpack("<Q", b[off + 0x10:off + 0x18])[0]
+                if tid:
+                    return tid
+    except (OSError, struct.error):
+        pass
+    m_ = re.findall(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", Path(folder).name)
+    return int(m_[0], 16) if m_ else None
+
+
+def _zstd():
+    try:
+        import zstandard
+    except ImportError:
+        raise UnpackError("NUP files are compressed with zstd, which needs the 'zstandard' package") from None
+    return zstandard
+
+
+def nup_tree(folder):
+    """The files under a folder -> [(path parts as str, absolute path, size)] in a stable order. Skips nothing but links."""
+    out = []
+    for dp, dn, fn in os.walk(folder):
+        dn.sort()
+        for f in sorted(fn):
+            fp = Path(dp) / f
+            if fp.is_symlink():
+                continue
+            out.append((tuple(fp.relative_to(folder).parts), fp, fp.stat().st_size))
+    return out
+
+
+def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: False, level=3):
+    """A decrypted Switch game folder -> a .nup (one base package). Writes the blob first, then the table, then the superblock."""
+    import hashlib
+    z = _zstd()
+    folder = Path(folder)
+    files = nup_tree(folder)
+    if not files:
+        raise UnpackError("the folder has no files in it")
+    # the tree: directories in the order they are first met, files numbered after them
+    dirs = {(): {"name": f"{title_id:016x}", "dirs": set(), "files": []}}
+    for parts, fp, size in files:
+        for k in range(1, len(parts)):
+            key = parts[:k]
+            if key not in dirs:
+                dirs[key] = {"name": key[-1], "dirs": set(), "files": []}
+                dirs[key[:-1]]["dirs"].add(key)
+        dirs[parts[:-1]]["files"].append(parts)
+    order = sorted(dirs, key=lambda k: (len(k), [x.encode() for x in k]))        # the root first
+    dix = {k: i for i, k in enumerate(order)}
+    fix = {f[0]: i for i, f in enumerate(files)}
+    nd, nf = len(order), len(files)
+    pool = bytearray()
+    names = {}
+
+    def intern(s):
+        b = s.encode("utf-8")
+        if b not in names:
+            names[b] = len(pool)
+            pool.extend(b)
+        return names[b], len(b)
+    dir_rec, children = [], []
+    for k in order:
+        d = dirs[k]
+        kids = [(x[-1].encode(), dix[x]) for x in d["dirs"]] + [(f[-1].encode(), nd + fix[f]) for f in d["files"]]
+        kids.sort()
+        no, nl = intern(d["name"]) if k else intern(d["name"])
+        dir_rec.append([no, nl, len(children), len(kids)])
+        children += [i for _n, i in kids]
+    file_names = [intern(f[0][-1]) for f in files]
+    root = dix[()]
+    exe, rom = dix.get(("exefs",), 0xFFFFFFFF), dix.get(("romfs",), 0xFFFFFFFF)
+    npdm = folder / "exefs" / "main.npdm"
+    meta = b""
+    if npdm.is_file() and npdm.stat().st_size < 1 << 20:
+        nb = npdm.read_bytes()
+        meta = struct.pack("<HHI", 1, 0, len(nb)) + nb
+    pkg_off, dir_off = 0x30, 0x30 + 0x40
+    file_off = dir_off + 0x18 * nd
+    child_off = file_off + 0x50 * nf
+    pool_off = child_off + 4 * len(children)
+    toc_end = pool_off + len(pool)
+    pool_size = len(pool) + (-toc_end % 16)                  # the string pool carries the padding, so the table ends on a 16-byte boundary
+    toc_size = pool_off + pool_size
+    blob_off = 0x80 + toc_size
+    blob_off += -blob_off % 16
+    uuid = hashlib.sha256(struct.pack("<QIB", title_id, version, 0)).digest()[:16]
+    ext = [None] * nf
+    meta_off = 0
+    with open(dest, "wb") as out:
+        out.seek(blob_off)
+        if meta:
+            meta_off = out.tell()
+            out.write(meta)
+            out.write(bytes(-out.tell() % 16))
+        total, done = max(1, sum(f[2] for f in files)), 0
+        cctx = z.ZstdCompressor(level=level)
+        for i, (parts, fp, size) in enumerate(files):
+            if size == 0:
+                ext[i] = (0, 0, hashlib.sha256(b"").digest(), 0)
+                continue
+            start = out.tell()
+            h = hashlib.sha256()
+            co = cctx.compressobj(size=size)
+            with open(fp, "rb") as f:
+                while True:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    b = f.read(1 << 20)
+                    if not b:
+                        break
+                    h.update(b)
+                    out.write(co.compress(b))
+                    done += len(b)
+                    if prog:
+                        prog(done / total)
+            out.write(co.flush())
+            csize = out.tell() - start
+            codec = 1
+            if csize >= size:                                # no gain: store it as it is
+                out.seek(start)
+                out.truncate()
+                with open(fp, "rb") as f:
+                    while True:
+                        b = f.read(1 << 22)
+                        if not b:
+                            break
+                        out.write(b)
+                csize, codec = size, 0
+            out.write(bytes(-out.tell() % 16))
+            ext[i] = (start, csize, h.digest(), codec)
+        # the table
+        toc = bytearray()
+        toc += b"TOC\x01" + struct.pack("<IQQQQQ", 1, nd, nf, pool_off, pool_size, 0)
+        toc += struct.pack("<QIIIIBBHI", title_id, root, exe, rom, version, 0, 0, 0, 0) + struct.pack("<QI", meta_off, len(meta)) + bytes(20)
+        for no, nl, fc, cc in dir_rec:
+            toc += struct.pack("<IIIIQ", no, nl, fc, cc, 0)
+        for (parts, fp, size), (no, nl), (eo, es, sh, codec) in zip(files, file_names, ext):
+            toc += struct.pack("<IIQQQ", no, nl, size, eo, es) + sh + struct.pack("<BBH", codec, 0, 0) + bytes(12)
+        for c in children:
+            toc += struct.pack("<I", c)
+        toc += pool + bytes(pool_size - len(pool))
+        assert len(toc) == toc_size, (len(toc), toc_size)
+        end = out.seek(0, 2)
+        sup = bytearray(0x80)
+        sup[0:4] = b"NUP\x01"
+        sup[4:0x18] = struct.pack("<HHQQ", 0x80, 1, 0x80, toc_size)
+        sup[0x18:0x38] = hashlib.sha256(bytes(toc)).digest()
+        sup[0x38:0x48] = struct.pack("<QQ", blob_off, end)
+        sup[0x48:0x4C] = struct.pack("<I", 1)
+        sup[0x4C:0x50] = struct.pack("<I", 0)
+        sup[0x50:0x60] = uuid
+        out.seek(0)
+        out.write(bytes(sup) + bytes(toc))
+
+
+def nup_open(path):
+    """Reads and checks a .nup's tables. -> (packages, dirs, files, read_file) where packages are dicts and read_file(file index) yields the file's
+    bytes in pieces, checked against the file's SHA-256 as it goes. Raises UnpackError with a plain reason."""
+    import hashlib
+    path = Path(path)
+    size = path.stat().st_size
+    f = open(path, "rb")
+    try:
+        sup = f.read(0x80)
+        if len(sup) < 0x80 or sup[:4] != b"NUP\x01":
+            raise UnpackError("this isn't a NUP file (or it is a version this program doesn't know)")
+        hsize, hver, toc_off, toc_size = struct.unpack("<HHQQ", sup[4:0x18])
+        blob_off, fsize, npk, flags = struct.unpack("<QQII", sup[0x38:0x50])
+        if hsize < 0x80 or toc_off != hsize or fsize != size or flags or npk < 1 or blob_off < toc_off + toc_size or toc_size > 1 << 31:
+            raise UnpackError("this NUP file is damaged or cut short (its header doesn't add up)")
+        f.seek(toc_off)
+        toc = f.read(toc_size)
+        if len(toc) != toc_size or hashlib.sha256(toc).digest() != sup[0x18:0x38]:
+            raise UnpackError("this NUP file is damaged (its table of files doesn't match its checksum)")
+        if toc[:4] != b"TOC\x01":
+            raise UnpackError("this NUP file is damaged (no table of files)")
+        npk2, nd, nf, pool_off, pool_size = struct.unpack("<IQQQQ", toc[4:0x28])
+        if npk2 != npk or 0x30 + 0x40 * npk + 0x18 * nd + 0x50 * nf > toc_size or pool_off + pool_size > toc_size:
+            raise UnpackError("this NUP file is damaged (its table of files is the wrong size)")
+        pool = toc[pool_off:pool_off + pool_size]
+
+        def name(o, n):
+            return pool[o:o + n].decode("utf-8", "replace")
+        pk = []
+        for i in range(npk):
+            r = toc[0x30 + 0x40 * i:0x70 + 0x40 * i]
+            tid, root, exe, rom, ver, kind, pf = struct.unpack("<QIIIIBB", r[:0x1A])
+            mo, ms = struct.unpack("<QI", r[0x20:0x2C])
+            pk.append({"title_id": tid, "root": root, "version": ver, "kind": kind, "flags": pf, "meta": (mo, ms)})
+        d0 = 0x30 + 0x40 * npk
+        dirs = [struct.unpack("<IIII", toc[d0 + 0x18 * i:d0 + 0x18 * i + 16]) for i in range(nd)]
+        f0 = d0 + 0x18 * nd
+        files = []
+        for i in range(nf):
+            r = toc[f0 + 0x50 * i:f0 + 0x50 * i + 0x50]
+            no, nl, sz, eo, es = struct.unpack("<IIQQQ", r[:0x20])
+            files.append({"name": name(no, nl), "size": sz, "off": eo, "esize": es, "sha": r[0x20:0x40], "codec": r[0x40]})
+        c0 = f0 + 0x50 * nf
+        nch = (pool_off - c0) // 4
+        children = struct.unpack(f"<{nch}I", toc[c0:c0 + 4 * nch])
+        dnames = [name(d[0], d[1]) for d in dirs]
+        for fl in files:
+            if fl["codec"] not in (0, 1):
+                raise UnpackError("this NUP file uses a way of storing files that this program doesn't know yet")
+            if fl["off"] + fl["esize"] > size or (fl["esize"] and fl["off"] < blob_off):
+                raise UnpackError("this NUP file is damaged (a file points outside it)")
+    except BaseException:
+        f.close()
+        raise
+    if any(fl["codec"] == 1 for fl in files):
+        _zstd()
+
+    def read_file(i):
+        fl = files[i]
+        f.seek(fl["off"])
+        left, h, got = fl["esize"], hashlib.sha256(), 0
+        if fl["codec"] == 0:
+            while left > 0:
+                b = f.read(min(1 << 20, left))
+                if not b:
+                    raise UnpackError("this NUP file is cut short")
+                h.update(b)
+                left -= len(b)
+                got += len(b)
+                yield b
+        else:
+            do = _zstd().ZstdDecompressor().decompressobj()
+            while left > 0:
+                b = f.read(min(1 << 20, left))
+                if not b:
+                    raise UnpackError("this NUP file is cut short")
+                left -= len(b)
+                try:
+                    out_ = do.decompress(b)
+                except _zstd().ZstdError:
+                    raise UnpackError(f"{fl['name']} in this NUP file is damaged (it can't be decompressed)") from None
+                h.update(out_)
+                got += len(out_)
+                yield out_
+        if got != fl["size"] or h.digest() != fl["sha"]:
+            raise UnpackError(f"{fl['name']} in this NUP file is damaged (its checksum doesn't match)")
+
+    def tree(pi):
+        """[(path parts, is_file, file index or None)] of one package."""
+        out_ = []
+
+        def walk(d, prefix):
+            first, cnt = dirs[d][2], dirs[d][3]
+            for c in children[first:first + cnt]:
+                if c < nd:
+                    out_.append((prefix + (dnames[c],), False, None))
+                    walk(c, prefix + (dnames[c],))
+                else:
+                    out_.append((prefix + (files[c - nd]["name"],), True, c - nd))
+        walk(pk[pi]["root"], ())
+        return out_
+    return pk, files, tree, read_file, f.close
+
+
+def nup_verify(path, folder, prog, stopped):
+    """Reads a finished NUP back: the same files in the same places as the folder, each one checked against its checksum."""
+    pk, files, tree, read_file, close = nup_open(path)
+    try:
+        if len(pk) != 1:
+            raise UnpackError("the NUP that was built doesn't hold one package; it was discarded")
+        want = {tuple(p_): sz for p_, _fp, sz in nup_tree(folder)}
+        got = {parts: files[fi]["size"] for parts, is_file, fi in tree(0) if is_file}
+        if want != got:
+            raise UnpackError("the NUP that was built doesn't list the same files as the folder; it was discarded")
+        total, done = max(1, sum(want.values())), 0
+        for parts, is_file, fi in tree(0):
+            if is_file:
+                for b in read_file(fi):
+                    if stopped():
+                        raise UnpackError("stopped")
+                    done += len(b)
+                    prog(min(1.0, done / total))
+    finally:
+        close()
+
+
+def nup_extract(path, dest, prog=None, stopped=lambda: False):
+    """A .nup -> a folder: a single package's files directly in it, several packages each in a folder of its own."""
+    pk, files, tree, read_file, close = nup_open(path)
+    dest = Path(dest)
+    try:
+        total, done = max(1, sum(f["size"] for f in files)), 0
+        for pi, p in enumerate(pk):
+            base = dest if len(pk) == 1 else dest / f"{p['title_id']:016X} ({NUP_KINDS.get(p['kind'], 'package')})"
+            for parts, is_file, fi in tree(pi):
+                if any(x in ("", ".", "..") or "/" in x or "\\" in x or ":" in x for x in parts):
+                    raise UnpackError("this NUP file holds a file name that isn't safe to unpack, so nothing was written")
+                tgt = base.joinpath(*parts)
+                if not is_file:
+                    tgt.mkdir(parents=True, exist_ok=True)
+                    continue
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                with open(tgt, "wb") as g:
+                    for b in read_file(fi):
+                        if stopped():
+                            raise UnpackError("stopped")
+                        g.write(b)
+                        done += len(b)
+                        if prog:
+                            prog(done / total)
+    finally:
+        close()
+    return pk
+
+
 # ---- writing a disc image
 class _P3Node:
     __slots__ = ("name", "is_dir", "size", "src", "kids", "pname", "jname", "lba", "ex", "dbytes", "num", "stamp", "skey")
@@ -7262,7 +7619,7 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",)}
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",)}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
@@ -9160,6 +9517,10 @@ class App:
                 games.append(Path(dp))                          # a PlayStation Store game folder (as RPCS3 keeps it): taken whole
                 dn[:] = []
                 continue
+            if nup_folder_ok(Path(dp)):
+                games.append(Path(dp))                          # a decrypted Switch game folder (exefs and romfs): taken whole
+                dn[:] = []
+                continue
             if any(x.lower() == "default.xex" for x in fns):
                 games.append(Path(dp))                          # an Xbox 360 game folder: taken whole
                 dn[:] = []
@@ -9179,7 +9540,7 @@ class App:
                     pieces_seen.add(first)
                     found.append(first)
             elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
-                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci"):
+                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci", ".nup"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
                 found.append(f)
@@ -9576,7 +9937,7 @@ class App:
     def out_stem(self, job, o):
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
-        stem = job.home.name if job.container in ("xfolder", "ps3folder", "psnfolder") else job.split_stem if job.container == "ps3parts" else job.home.stem
+        stem = job.home.name if job.container in ("xfolder", "ps3folder", "psnfolder", "swfolder") else job.split_stem if job.container == "ps3parts" else job.home.stem
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
@@ -10094,6 +10455,10 @@ class App:
             return self.do_folder_to_pkg(job, o)
         if t == "folder" and job.container == "ps3pkg":
             return self.do_pkg_to_folder(job, o)
+        if t == "nup" and job.container == "swfolder":
+            return self.do_folder_to_nup(job, o)
+        if t == "folder" and job.container == "nup":
+            return self.do_nup_to_folder(job, o)
         if t == "xci" and job.container in ("swnsp", "swxci"):
             return self.do_nsp_to_xci(job, o)
         if t == "nsp" and job.container in ("swnsp", "swxci"):
@@ -10794,6 +11159,80 @@ class App:
             part.unlink(missing_ok=True)
         if o["delete_src"] and verify:
             self.remove_sources(job, o)
+
+    def do_folder_to_nup(self, job, o):
+        """A decrypted Switch game folder -> a NUP (a community container, zstd compressed, with a checksum for every file). Experimental."""
+        tid = nup_title_id(job.path)
+        if tid is None:
+            job.status, job.result = "Failed (can't build)", ("it can't tell which game this is; put the game's 16-digit title id in square brackets in the folder's name, "
+                                                             "like [0100ABCD12345000]")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        mv = re.search(r"\[v(\d+)\]", job.path.name)
+        self.post("log", f"\n{job.path.name}  [game folder → NUP]  (experimental: written from the public draft of the format; not tried in an emulator yet)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Building NUP")
+        stop = lambda: self.stop_flag  # noqa: E731
+        try:
+            build_nup(job.path, part, tid, int(mv.group(1)) if mv else 0, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            if verify:
+                self.post("log", "Reading the new NUP back against the folder…", "info")
+                nup_verify(part, job.path, lambda x: prog(0.6 + x * 0.4), stop)
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.zar_raw)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_nup_to_folder(self, job, o):
+        """A NUP -> the folder of files it holds (every file checked against its checksum)."""
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        work = out.parent / f".{out.name[:40]}.chdm_nup"
+        shutil.rmtree(work, ignore_errors=True)
+        self.post("log", f"\n{job.path.name}  [NUP → game folder]  (experimental)", "info")
+        prog = self.cso_progress(job, "Unpacking")
+        ok = False
+        try:
+            work.mkdir(parents=True)
+            nup_extract(job.path, work, prog, lambda: self.stop_flag)
+            os.replace(work, out)
+            ok = True
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if ok:
+            self.folder_finish(job, out)
+            self.post("log", f"OK  {out}", "ok")
+            if o["delete_src"] and self.verify_wanted():
+                self.remove_sources(job, o)
 
     def do_sw_split(self, job, o):
         """A Switch XCI or NSP that holds several titles -> a folder with one NSP for the game, one for the update and one for each extra content."""
