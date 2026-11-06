@@ -78,7 +78,7 @@ def scrub_private(text):
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".nup", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".nup", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -4255,7 +4255,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4295,9 +4295,9 @@ def parse_cue_tracks(p):
 SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # What a target's file is, against the size of the unpacked disc. Compressed targets use a typical figure, not the
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
-SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
+SPACE_RATIO = {"z3ds": 0.8, "chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
-SPACE_EXT = {"xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
+SPACE_EXT = {"z3ds": ".zcci", "unz3ds": ".cci", "xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
              "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
@@ -4346,6 +4346,7 @@ class Job:
         self.m3u_chds = []             # for a playlist: its CHD files, one per disc
         self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
+        self.z3_raw = 0                # a 3DS file: its size when not compressed
         self.xiso_base = 0             # an original Xbox disc dump whose game data starts later in the file (a full Redump-style dump)
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
@@ -4390,6 +4391,8 @@ class Job:
                 return read_cso_header(p)[0]
             if self.container in ("psnfolder", "swfolder", "nup"):
                 return self.zar_raw
+            if self.container == "z3ds":
+                return self.z3_raw
             if self.container in ("zar", "xfolder", "ps3folder"):
                 return self.zar_raw + 4 * XISO_MODULUS
             if self.container == "disc":
@@ -4423,6 +4426,8 @@ class Job:
         """[(key, label)] of everything this item can safely become. Nothing is offered that is known not to work."""
         if self.container == "zar":                 # Xbox 360: the files become a disc image, or a CHD of one
             return [(k, target_label(k)) for k in ("chd", "iso", "folder")]
+        if self.container == "z3ds":                # a 3DS file: compressed for Azahar, or back to the plain file
+            return [("unz3ds" if self.path.suffix.lower() in Z3_PACKED else "z3ds", target_label("unz3ds" if self.path.suffix.lower() in Z3_PACKED else "z3ds"))]
         if self.container == "xfolder":
             return [(k, target_label(k)) for k in (("chd", "iso") if self.platform == "Xbox" else ("chd", "iso", "zar"))]
         if self.platform == "Xbox" and self.path.suffix.lower() == ".iso" and self.container != "disc":
@@ -4611,6 +4616,22 @@ class Job:
             what = ("game" if any(x["kind"] == 0 for x in pkgs) else "no game") + (f" + {u} update{'s' if u != 1 else ''}" if u else "") + (f" + {d} extra content" if d else "")
             self.auto_type, self.reason = "DVD", f"Switch game folder, decrypted ({what}; {len(tree)} files)"
             self.warn = nup_resolve(pkgs, p) or ""
+            return
+        if (ext in Z3_RAW or ext in Z3_PACKED) and not p.is_dir():
+            if ext in Z3_PACKED:
+                h = z3ds_header(p)
+                self.z3_raw = h["usize"]
+                self.reason = f"Nintendo 3DS file, compressed for Azahar ({fmt_size(h['usize'])} when unpacked)"
+            else:
+                _magic, enc = z3ds_plain_info(p)
+                self.z3_raw = p.stat().st_size
+                self.reason = "Nintendo 3DS file"
+                if enc:
+                    self.warn = ("this dump looks encrypted. It can still be compressed, but the Azahar emulator only runs decrypted dumps "
+                                 "(CHD Manager doesn't decrypt anything)")
+            self.container, self.platform, self.types = "z3ds", "3DS", ["MODE1"]
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.auto_type = "DVD"
             return
         if ext == ".nup" and not p.is_dir():
             try:
@@ -5203,6 +5224,151 @@ def xiso_files(path, root_only=False):
                     stack.append(right * 4)
         walk(root_sector, root_size, (), 0)
         return base, out
+
+
+# ---- Nintendo 3DS: Azahar's compressed files (.zcci, .zcxi, .z3dsx). A 32-byte header, a small block of notes, then the plain file cut into
+# 256 KiB pieces that are each zstd-compressed, followed by a table of the pieces' sizes (the 'seekable zstd' layout), so an emulator can
+# read any part without unpacking the rest. Written from the layout Azahar's own source shows; this program reads and writes it itself.
+Z3_RAW = {".3ds": (".zcci", b"NCSD"), ".cci": (".zcci", b"NCSD"), ".cxi": (".zcxi", b"NCCH"), ".3dsx": (".z3dsx", b"3DSX")}
+Z3_PACKED = {".zcci": ".cci", ".zcxi": ".cxi", ".z3dsx": ".3dsx"}
+Z3_FRAME = 256 * 1024
+Z3_HEAD = struct.Struct("<4s4sBBHIQQ")
+
+
+def z3ds_plain_info(path):
+    """(magic, looks encrypted) of a plain 3DS file. Raises ValueError with a plain sentence when it isn't one."""
+    ext = Path(path).suffix.lower()
+    with open(path, "rb") as f:
+        head = f.read(0x200)
+        if ext == ".3dsx":
+            if head[:4] != b"3DSX":
+                raise ValueError("this isn't a 3DS homebrew file (it doesn't start like one)")
+            return b"3DSX", False
+        want = b"NCSD" if ext in (".3ds", ".cci") else b"NCCH"
+        if len(head) < 0x200 or head[0x100:0x104] != want:
+            raise ValueError(f"this isn't a Nintendo 3DS {'cartridge dump' if want == b'NCSD' else 'game file'} (it doesn't start like one), or it is damaged")
+        if want == b"NCSD":
+            f.seek(struct.unpack("<I", head[0x120:0x124])[0] * 0x200)
+            head = f.read(0x200)
+            if len(head) < 0x200 or head[0x100:0x104] != b"NCCH":
+                raise ValueError("this 3DS dump is damaged (its first game part can't be read)")
+    return want, not head[0x18F] & 4
+
+
+def z3ds_header(path):
+    """The header of a compressed 3DS file -> {'underlying', 'hdr', 'meta', 'csize', 'usize'}. Raises ValueError with a plain sentence."""
+    path = Path(path)
+    with open(path, "rb") as f:
+        raw = f.read(Z3_HEAD.size)
+    if len(raw) < Z3_HEAD.size or raw[:4] != b"Z3DS":
+        raise ValueError("this isn't a compressed 3DS file (it doesn't start like one)")
+    _m, und, ver, _r, hdr, meta, csize, usize = Z3_HEAD.unpack(raw)
+    if ver != 1:
+        raise ValueError(f"this compressed 3DS file is version {ver}, which this program doesn't know")
+    if hdr < Z3_HEAD.size or hdr + meta + csize != path.stat().st_size:
+        raise ValueError("this compressed 3DS file is damaged or cut short (its size isn't what its header says)")
+    return {"underlying": und, "hdr": hdr, "meta": meta, "csize": csize, "usize": usize}
+
+
+def _zs():
+    try:
+        import zstandard
+    except ImportError:
+        raise UnpackError("compressed 3DS files use zstd, which needs the 'zstandard' package (see More, About)") from None
+    return zstandard
+
+
+def z3ds_pack(src, dest, magic, prog, stopped, level=3):
+    """A plain 3DS file -> a compressed one."""
+    zs = _zs()
+    usize = os.path.getsize(src)
+    meta = bytearray([1])
+    for k, v in (("compressor", f"CHD Manager {APP_VER}"), ("date", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())), ("maxframesize", str(Z3_FRAME))):
+        kb, vb = k.encode(), v.encode()
+        meta += struct.pack("<BBH", 1, len(kb), len(vb)) + kb + vb
+    meta += bytes(4)
+    meta += bytes(-len(meta) % 16)
+    cctx = zs.ZstdCompressor(level=level)
+    sizes = []
+    with open(src, "rb") as a, open(dest, "wb") as b:
+        b.write(bytes(Z3_HEAD.size))
+        b.write(meta)
+        done = 0
+        while True:
+            blk = a.read(Z3_FRAME)
+            if not blk:
+                break
+            if stopped():
+                raise UnpackError("stopped")
+            fr = cctx.compress(blk)
+            b.write(fr)
+            sizes.append((len(fr), len(blk)))
+            done += len(blk)
+            prog(done / max(1, usize))
+        tab = (struct.pack("<II", 0x184D2A5E, len(sizes) * 8 + 9) + b"".join(struct.pack("<II", c, d) for c, d in sizes)
+               + struct.pack("<IBI", len(sizes), 0, 0x8F92EAB1))
+        b.write(tab)
+        b.seek(0)
+        b.write(Z3_HEAD.pack(b"Z3DS", magic, 1, 0, Z3_HEAD.size, len(meta), sum(c for c, _ in sizes) + len(tab), usize))
+
+
+def z3ds_blocks(path):
+    """Yield the plain file's pieces, in order, from a compressed 3DS file."""
+    zs = _zs()
+    h = z3ds_header(path)
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        f.seek(size - 9)
+        n, desc, magic = struct.unpack("<IBI", f.read(9))
+        if magic != 0x8F92EAB1:
+            raise UnpackError("this compressed 3DS file has no table of its pieces, so it can't be read")
+        esz = 12 if desc & 0x80 else 8
+        f.seek(size - 9 - n * esz - 8)
+        tmagic, _tsz = struct.unpack("<II", f.read(8))
+        if tmagic != 0x184D2A5E:
+            raise UnpackError("this compressed 3DS file's table of pieces is damaged")
+        table = [struct.unpack_from("<II", f.read(esz))[:2] for _ in range(n)]
+        if sum(c for c, _ in table) + 8 + n * esz + 9 != h["csize"] or sum(d for _, d in table) != h["usize"]:
+            raise UnpackError("this compressed 3DS file's table of pieces doesn't add up, so it is damaged")
+        f.seek(h["hdr"] + h["meta"])
+        dctx = zs.ZstdDecompressor()
+        for c, d in table:
+            data = f.read(c)
+            if len(data) != c:
+                raise UnpackError("this compressed 3DS file is cut short")
+            try:
+                out = dctx.decompress(data, max_output_size=max(d, 1))
+            except zs.ZstdError as e:
+                raise UnpackError(f"this compressed 3DS file is damaged ({e})") from None
+            if len(out) != d:
+                raise UnpackError("this compressed 3DS file is damaged (a piece has the wrong size)")
+            yield out
+
+
+def z3ds_unpack(src, dest, prog, stopped):
+    """A compressed 3DS file -> the plain file."""
+    usize, done = z3ds_header(src)["usize"], 0
+    with open(dest, "wb") as b:
+        for blk in z3ds_blocks(src):
+            if stopped():
+                raise UnpackError("stopped")
+            b.write(blk)
+            done += len(blk)
+            prog(done / max(1, usize))
+
+
+def z3ds_matches(packed, plain, prog, stopped):
+    """True when the compressed file unpacks to exactly the plain file."""
+    usize, done = z3ds_header(packed)["usize"], 0
+    with open(plain, "rb") as f:
+        for blk in z3ds_blocks(packed):
+            if stopped():
+                raise UnpackError("stopped")
+            if f.read(len(blk)) != blk:
+                return False
+            done += len(blk)
+            prog(done / max(1, usize))
+        return not f.read(1)
 
 
 STFS_TYPES = {0x7000: "a Games on Demand title", 0xD0000: "an Xbox Live Arcade game", 0xB0000: "a title update", 0x2: "downloadable content",
@@ -9901,7 +10067,8 @@ class App:
                     pieces_seen.add(first)
                     found.append(first)
             elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
-                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci", ".nup"):
+                                    ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci", ".nup",
+                                    ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx"):
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
                 found.append(f)
@@ -10380,7 +10547,7 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso", "z3ds", "unz3ds")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         if o.get("psp_drop_update") and job.platform == "PSP" and ext == ".iso" and t in ("chd", "cso", "cso2", "zso"):
@@ -10874,6 +11041,8 @@ class App:
             return self.do_xci_to_nsp(job, o)
         if t == "split" and job.container in ("swnsp", "swxci"):
             return self.do_sw_split(job, o)
+        if t in ("z3ds", "unz3ds") and job.container == "z3ds":
+            return self.do_z3ds(job, o)
         if t == "folder":
             return self.do_to_folder(job, o)
         return self.export_via_chd(job, o)
@@ -11014,6 +11183,49 @@ class App:
         job.status, job.result = "Done", f"→ {out.name}"
         self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
         return True
+
+    def do_z3ds(self, job, o):
+        """A plain Nintendo 3DS file <-> Azahar's compressed one."""
+        packing = job.target == "z3ds"
+        ext = job.path.suffix.lower()
+        new_ext, magic = Z3_RAW[ext] if packing else (Z3_PACKED[ext], b"")
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, new_ext), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [3DS → {'compressed' if packing else 'uncompressed'}]", "info")
+        try:
+            if packing:
+                z3ds_pack(job.path, part, magic, self.cso_progress(job, "Compressing"), stop)
+            else:
+                z3ds_unpack(job.path, part, self.cso_progress(job, "Unpacking"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                a, b = (part, job.path) if packing else (job.path, part)
+                if not z3ds_matches(a, b, self.cso_progress(job, "Verifying"), stop):
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
 
     def psp_scrub(self, job, o, tmpdir):
         """With 'remove the firmware update' on and a PSP ISO that has one: a temporary copy of the ISO with those files emptied
