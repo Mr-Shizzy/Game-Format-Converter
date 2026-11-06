@@ -43,6 +43,38 @@ APP_VER = "2.0.1"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 SETTINGS_FILE = HERE / "chd_manager_settings.json"
+LOG_MAX = 1_000_000                 # the log file is started afresh (the old one kept once) when it passes this size
+
+
+def log_path():
+    return SETTINGS_FILE.with_name("chd_manager.log")
+
+
+def file_log(text, tag="info"):
+    """Add lines to chd_manager.log next to the program, so a problem can be looked at afterwards. Never raises."""
+    try:
+        p = log_path()
+        if p.exists() and p.stat().st_size > LOG_MAX:
+            os.replace(p, p.with_name("chd_manager.old.log"))
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(p, "a", encoding="utf-8", errors="replace") as f:
+            for line in str(text).rstrip("\n").split("\n"):
+                f.write(f"{stamp} {tag.upper():<4} {line}\n")
+    except Exception:  # noqa: BLE001  (a log that cannot be written must never get in the way)
+        pass
+
+
+def scrub_private(text):
+    """Hide the person's user name and home folder in text that they are about to send to someone."""
+    try:
+        home = str(Path.home())
+        user = Path.home().name
+    except Exception:  # noqa: BLE001
+        return text
+    for a, b in ((home, "<home>"), (home.replace("\\", "/"), "<home>"), (user, "<user>")):
+        if a and len(a) > 2:
+            text = text.replace(a, b)
+    return text
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
@@ -4223,7 +4255,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "folder": "→ Game folder (loose files)", "xiso": "→ ISO, trimmed (smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)"}
@@ -4265,7 +4297,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
 SPACE_RATIO = {"chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0}
-SPACE_EXT = {"chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
+SPACE_EXT = {"xiso": ".iso", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
              "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
 
@@ -4314,6 +4346,7 @@ class Job:
         self.m3u_chds = []             # for a playlist: its CHD files, one per disc
         self.cso_ver = 1               # a CSO source: 1 or 2 (maxcso's experimental layout)
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
+        self.xiso_base = 0             # an original Xbox disc dump whose game data starts later in the file (a full Redump-style dump)
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
         self.nsps = []                 # a Switch package (container 'swnsp'): its info, with the game's updates and extra content added to it
@@ -4391,7 +4424,10 @@ class Job:
         if self.container == "zar":                 # Xbox 360: the files become a disc image, or a CHD of one
             return [(k, target_label(k)) for k in ("chd", "iso", "folder")]
         if self.container == "xfolder":
-            return [(k, target_label(k)) for k in ("chd", "iso", "zar")]
+            return [(k, target_label(k)) for k in (("chd", "iso") if self.platform == "Xbox" else ("chd", "iso", "zar"))]
+        if self.platform == "Xbox" and self.path.suffix.lower() == ".iso" and self.container != "disc":
+            # an original Xbox disc image: a CHD of it, its files, or (for a full dump) a trimmed ISO that holds just the game
+            return [(k, target_label(k)) for k in ("chd",) + (("xiso",) if self.xiso_base else ()) + ("folder",)]
         if self.container == "ps3folder":           # a PS3 game folder: a disc image of it (RPCS3 loads those), or a CHD of one
             return [(k, target_label(k)) for k in ("iso", "chd")]
         if self.container == "psnfolder":           # a PSN game folder: a package of it that RPCS3 can install
@@ -4608,14 +4644,16 @@ class Job:
                 self.size, self.src_files = self.zar_raw, [p]
                 self.auto_type, self.reason = "DVD", "PS3 game folder"
                 return
-            ents = folder_source(p)[0]              # an Xbox 360 game folder (the disc's files, with default.xex at the top)
-            if not any(len(pp) == 1 and pp[0].lower() == b"default.xex" and f for pp, f, _o, _s in ents):
-                raise ValueError("this folder doesn't look like an Xbox 360 or PlayStation 3 game (it has no default.xex at its top level "
-                                 "and no PS3_GAME folder with a PARAM.SFO)")
-            self.container, self.platform, self.types = "xfolder", "Xbox 360", ["MODE1"]
+            ents = folder_source(p)[0]              # an Xbox 360 game folder (default.xex at the top) or an original Xbox one (default.xbe)
+            tops = {pp[0].lower() for pp, f, _o, _s in ents if f and len(pp) == 1}
+            if b"default.xex" not in tops and b"default.xbe" not in tops:
+                raise ValueError("this folder doesn't look like an Xbox, Xbox 360 or PlayStation 3 game (it has no default.xbe or default.xex at its "
+                                 "top level and no PS3_GAME folder with a PARAM.SFO)")
+            old_xbox = b"default.xex" not in tops
+            self.container, self.platform, self.types = "xfolder", "Xbox" if old_xbox else "Xbox 360", ["MODE1"]
             self.zar_raw = sum(sz for _p, f, _o, sz in ents if f)
             self.size, self.src_files = self.zar_raw, [p]
-            self.auto_type, self.reason = "DVD", "Xbox 360 game folder"
+            self.auto_type, self.reason = "DVD", "Xbox game folder" if old_xbox else "Xbox 360 game folder"
             return
         if ext == ".chd":
             self.size = p.stat().st_size
@@ -4744,6 +4782,11 @@ class Job:
             if kind:
                 self.platform, self.xbox = "Xbox 360" if kind == "360" else "Xbox", kind == "360"
                 self.auto_type, self.reason = "DVD", "Xbox disc image"
+                if kind == "xbox":
+                    try:
+                        self.xiso_base = xiso_files(p, root_only=True)[0]
+                    except (UnpackError, OSError, struct.error):
+                        pass
             else:
                 pinfo = ps3_iso_kind(p)
                 if pinfo:
@@ -5160,6 +5203,89 @@ def xiso_files(path, root_only=False):
                     stack.append(right * 4)
         walk(root_sector, root_size, (), 0)
         return base, out
+
+
+STFS_TYPES = {0x7000: "a Games on Demand title", 0xD0000: "an Xbox Live Arcade game", 0xB0000: "a title update", 0x2: "downloadable content",
+              0x4000: "an installed game", 0x1000: "a downloaded Xbox 360 title", 0x1: "a saved game", 0x80000: "a game demo"}
+
+
+def psp_update_ranges(path):
+    """[(byte offset, length)] of the files inside the UPDATE folder of a PSP disc image (a Sony system update that nothing uses);
+    [] when the image has none or can't be read."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(16 * 2048)
+            pvd = f.read(2048)
+            if pvd[:1] != b"\x01" or pvd[1:6] != b"CD001":
+                return []
+
+            def entries(ext, ln):
+                f.seek(ext * 2048)
+                data = f.read(min(ln, 1 << 20))
+                pos, out = 0, []
+                while pos < len(data):
+                    n = data[pos]
+                    if n == 0:
+                        pos = (pos // 2048 + 1) * 2048
+                        continue
+                    if pos + 33 > len(data):
+                        break
+                    nl = data[pos + 32]
+                    name = data[pos + 33:pos + 33 + nl]
+                    if name not in (b"\x00", b"\x01"):
+                        out.append((name.decode("latin1").split(";")[0].upper(), struct.unpack("<I", data[pos + 2:pos + 6])[0],
+                                    struct.unpack("<I", data[pos + 10:pos + 14])[0], bool(data[pos + 25] & 2)))
+                    pos += n
+                return out
+
+            def walk(ext, ln, depth):
+                found = []
+                for _n, e, sz, isdir in entries(ext, ln):
+                    if isdir and depth < 4:
+                        found += walk(e, sz, depth + 1)
+                    elif not isdir and sz:
+                        found.append((e * 2048, sz))
+                return found
+            ranges = []
+            for name, e, sz, isdir in entries(struct.unpack("<I", pvd[158:162])[0], struct.unpack("<I", pvd[166:170])[0]):
+                if name == "UPDATE" and isdir:
+                    ranges += walk(e, sz, 0)
+            return ranges
+    except (OSError, struct.error):
+        return []
+
+
+def copy_zeroing(src, dest, ranges, prog, stopped):
+    """Copy a file, writing zeros in place of the given (offset, length) ranges."""
+    size = os.path.getsize(src)
+    ranges = sorted(ranges)
+    with open(src, "rb") as a, open(dest, "wb") as b:
+        pos = 0
+        while pos < size:
+            if stopped():
+                raise UnpackError("stopped")
+            buf = bytearray(a.read(min(1 << 20, size - pos)))
+            if not buf:
+                raise UnpackError("the disc image is shorter than it should be")
+            for off, ln in ranges:
+                lo, hi = max(off, pos), min(off + ln, pos + len(buf))
+                if lo < hi:
+                    buf[lo - pos:hi - pos] = bytes(hi - lo)
+            b.write(buf)
+            pos += len(buf)
+            prog(pos / max(1, size))
+
+
+def stfs_kind(path):
+    """None unless the file is an Xbox 360 package (STFS: starts with LIVE, PIRS or CON); then a short description of what kind."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x348)
+    except OSError:
+        return None
+    if len(head) < 0x348 or head[:4] not in (b"LIVE", b"PIRS", b"CON "):
+        return None
+    return STFS_TYPES.get(struct.unpack(">I", head[0x344:0x348])[0], "a downloadable package")
 
 
 def xbox_iso_kind(path):
@@ -7966,7 +8092,7 @@ def write_m3u_playlists(outputs, exists="Skip"):
 # --------------------------------------------------------------------------- App
 DEFAULTS = {
     "chdman": "", "compression": "Default", "custom_comp": "", "hunk": "", "threads": 0,
-    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
+    "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False, "psp_drop_update": False,
     "extract_subfolder": False,
     "out_mode": "same", "out_dir": "", "keep_structure": False, "last_dir": "", "geometry": "",
     "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "pkg_key": "", "switch_keys": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
@@ -8054,6 +8180,10 @@ class App:
             pass
         moved = relocate_settings(self.settings)
         CHDMAN = find_chdman(self.settings.get("chdman", ""))
+        file_log(f"==== {APP_NAME} {APP_VER} started: {platform.platform()}, Python {platform.python_version()}, "
+                 f"{'packaged exe' if FROZEN else 'source'}, chdman: {Path(CHDMAN).name if CHDMAN else 'NOT FOUND'}")
+        root.report_callback_exception = self.on_ui_error
+        threading.excepthook = lambda a: file_log("".join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)), "err")
         restored = None
         if not CHDMAN:
             restored = restore_bundled_chdman()
@@ -8144,6 +8274,8 @@ class App:
         self.more_menu.add_command(label=self.theme_menu_label(), command=self.toggle_theme)
         self.theme_menu_index = self.more_menu.index("end")
         self.more_menu.add_separator()
+        self.more_menu.add_command(label="Copy a report for support", command=self.copy_report)
+        self.more_menu.add_command(label="Show the log file", command=self.open_log_folder)
         self.more_menu.add_command(label="About CHD Manager…", command=lambda: self.open_settings("About"))
 
         # ---- bottom, packed first so it always keeps its space: footer, then action bar, then the settings line
@@ -8411,6 +8543,15 @@ class App:
         ttk.Button(g3, text="Wii setup (Dolphin or your key)…", command=self.show_wii_setup).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.wii_status = ttk.Label(g3, text="", style="Muted.TLabel", wraplength=560, justify="left")
         self.wii_status.grid(row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
+
+        g5 = ttk.LabelFrame(f, text=" PSP (CSO, ZSO and CHD) ", padding=10)
+        g5.grid(row=20, column=0, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(g5, text="Leave out the firmware update that PSP discs carry (the UPDATE folder)",
+                        variable=v["psp_drop_update"]).grid(row=0, column=0, sticky="w")
+        ttk.Label(g5, style="Muted.TLabel", wraplength=560, justify="left",
+                  text="Many PSP discs hold an old Sony system update that no emulator and no custom-firmware PSP uses. This empties it in the copy "
+                       "that gets compressed, which saves its size (usually tens of MB). Your original ISO is not changed. A few games are reported to "
+                       "want that folder: if one misbehaves, convert it again with this off.").grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         g4 = ttk.LabelFrame(f, text=" PlayStation 3 (game folder ↔ ISO, .pkg packages) ", padding=10)
         g4.grid(row=4, column=0, sticky="ew", pady=(8, 0))
@@ -9402,7 +9543,7 @@ class App:
                         pass
                 found += [(f, p) for f in files]
                 if not files and not ignored:
-                    self.refuse(p.name, "No disc images or game folders (Xbox 360, PlayStation 3) were found in this folder (its sub-folders were searched too).", "warn")
+                    self.refuse(p.name, "No disc images or game folders (Xbox, Xbox 360, PlayStation 3) were found in this folder (its sub-folders were searched too).", "warn")
                 if ignored:
                     self.refuse(p.name, sentence(f"{sum(ignored.values())} {', '.join(sorted(ignored))} file(s) were left out: an .mdf is only the data half "
                                                  "of a disc image, and it needs its .mds file next to it"), "warn",
@@ -9417,8 +9558,14 @@ class App:
             elif p.suffix.lower() in SRC_EXTS | {".chd"}:
                 found.append((image_primary(p), None))
             else:
-                self.refuse(p.name, sentence(f"CHD Manager doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
-                            f"Skipped (unsupported type): {p.name}")
+                pk = stfs_kind(p)
+                if pk:
+                    self.refuse(p.name, sentence(f"This is an Xbox 360 download package ({pk}), not a disc image. A package isn't a disc, so there is "
+                                                 "nothing to convert: Xenia plays it as it is (if it has a matching .data folder, keep that next to it)"), "warn",
+                                f"Skipped (Xbox 360 package, {pk}): {p.name}")
+                else:
+                    self.refuse(p.name, sentence(f"CHD Manager doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
+                                f"Skipped (unsupported type): {p.name}")
         refs = sheet_refs(f for f, _r in found)          # a disc file that a sheet in this batch already covers is part of that sheet
         mine = [(f, r) for f, r in found if f.suffix.lower() in (".cue", ".gdi", ".toc") or str(f).lower() not in refs]
         for f, _r in found:
@@ -9601,12 +9748,45 @@ class App:
 
     # ------------------------------------------------------------------ log
     def log(self, text, tag="info"):
+        file_log(text, tag)
         self.logbox.configure(state="normal")
         self.logbox.insert("end", text.rstrip("\n") + "\n", tag)
         self.logbox.see("end")
         self.logbox.configure(state="disabled")
         if self.echo:
             self.echo(text.rstrip("\n"), tag)
+
+    def on_ui_error(self, exc, val, tb):
+        """An error inside a button or menu: kept in the log (and shown in it) instead of vanishing."""
+        try:
+            self.log("Something went wrong in the program itself:\n" + "".join(traceback.format_exception(exc, val, tb)), "err")
+            self.show_log(True)
+        except Exception:  # noqa: BLE001
+            file_log("".join(traceback.format_exception(exc, val, tb)), "err")
+
+    def support_report(self):
+        """What to send when something went wrong: the start of the log file (versions) and its latest lines, with the person's name hidden."""
+        try:
+            lines = log_path().read_text("utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        starts = [i for i, l in enumerate(lines) if "====" in l and "started" in l]
+        head = lines[starts[-1]:starts[-1] + 1] if starts else []
+        body = [l for l in lines[-400:] if l not in head]
+        return scrub_private("\n".join(["CHD Manager report"] + head + ["--- latest lines of the log ---"] + body))
+
+    def copy_report(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.support_report())
+        self.notify("A report has been copied. Paste it into your message when you ask for help. It holds the program version, "
+                    "your Windows version, and the latest log lines (file names are in there, your user name is hidden).")
+
+    def open_log_folder(self):
+        p = log_path()
+        if p.exists():
+            open_folder(p, select=True)
+        else:
+            open_folder(p.parent)
 
     def copy_log(self):
         self.root.clipboard_clear()
@@ -9702,8 +9882,8 @@ class App:
                 games.append(Path(dp))                          # a decrypted Switch game folder (exefs and romfs): taken whole
                 dn[:] = []
                 continue
-            if any(x.lower() == "default.xex" for x in fns):
-                games.append(Path(dp))                          # an Xbox 360 game folder: taken whole
+            if any(x.lower() in ("default.xex", "default.xbe") for x in fns):
+                games.append(Path(dp))                          # an Xbox or Xbox 360 game folder: taken whole
                 dn[:] = []
                 continue
             allf += [Path(dp) / fn for fn in fns]
@@ -10093,6 +10273,7 @@ class App:
             job.status = "Working…"
             self.post("job", job)
             started = time.time()
+            file_log(f"job {i + 1}/{total}: {job.path.name}  [{job.platform}, {job.kind} -> {job.target or 'default'}, {fmt_size(job.size)}]")
             try:
                 {"convert": self.do_convert, "extract": self.do_extract, "verify": self.do_verify,
                  "recompress": self.do_recompress}[job.kind](job, o)
@@ -10100,6 +10281,7 @@ class App:
                 job.status = "Error"
                 self.post("log", traceback.format_exc(), "err")
             took = fmt_time(time.time() - started)
+            file_log(f"   result: {job.status} {job.result} ({took})")
             if job.status.startswith("Done"):
                 stats["ok"] += 1
                 if job.kind in ("convert", "recompress"):
@@ -10198,9 +10380,11 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
+        if o.get("psp_drop_update") and job.platform == "PSP" and ext == ".iso" and t in ("chd", "cso", "cso2", "zso"):
+            extra += raw                                     # the temporary copy without the firmware update
         if job.container == "ps3pkg":
             extra = 300 * 1024 * 1024                        # the throwaway copy of RPCS3's program files, if they can't be linked
         out = self.output_path(job, o, SPACE_EXT.get(t, ".x"), make=False).parent
@@ -10487,11 +10671,21 @@ class App:
             if temp_cue:
                 src = temp_cue
                 self.post("log", f"{job.path.name}: file names differ from the sheet only in upper/lower case; using a corrected temporary copy.", "info")
+        tmp_psp = None
         try:
             out = self.output_path(job, o, ".chd")
             out, force, skip = self.handle_exists(job, out, o)
             if skip:
                 return
+            if src is job.path:                                  # a PSP ISO whose firmware update is to be left out is compressed from a copy without it
+                tmp_psp = out.parent / f".{out.stem[:40]}.chdm_psp"
+                try:
+                    src = self.psp_scrub(job, o, tmp_psp) or src
+                except (UnpackError, OSError) as e:
+                    job.status, job.result = ("Stopped", "") if self.stop_flag else ("Failed (can't prepare)", str(e))
+                    if not self.stop_flag:
+                        self.post("log", f"{job.path.name}: {e}", "err")
+                    return
             verb = "createcd"
             if typ == "DVD":
                 if self.has_dvd:
@@ -10504,6 +10698,8 @@ class App:
             self.post("log", "$ " + " ".join(f'"{c}"' if " " in c else c for c in cmd), "cmd")
             rc = self.run_proc(cmd, job, "Compressing")
         finally:
+            if tmp_psp is not None:
+                shutil.rmtree(tmp_psp, ignore_errors=True)
             if temp_cue and temp_cue.exists():
                 try:
                     temp_cue.unlink()
@@ -10656,7 +10852,7 @@ class App:
             return self.do_cso_convert(job, o, lz4=t == "zso")
         if t == "iso" and job.container == "cso":
             return self.do_cso_to_iso(job, o)
-        if t == "iso" and job.container in ("zar", "xfolder"):
+        if t == "xiso" or (t == "iso" and job.container in ("zar", "xfolder")):
             return self.do_zar_to_iso(job, o)
         if t == "iso" and job.container == "ps3folder":
             return self.do_ps3_to_iso(job, o)
@@ -10819,16 +11015,42 @@ class App:
         self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
         return True
 
+    def psp_scrub(self, job, o, tmpdir):
+        """With 'remove the firmware update' on and a PSP ISO that has one: a temporary copy of the ISO with those files emptied
+        (the original isn't touched). Otherwise None."""
+        if not o.get("psp_drop_update") or job.platform != "PSP" or job.path.suffix.lower() != ".iso" or job.container == "disc":
+            return None
+        ranges = psp_update_ranges(job.path)
+        total = sum(n for _o, n in ranges)
+        if total < 2048:
+            return None
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        dest = tmpdir / "t.iso"
+        self.post("log", f"{job.path.name}: emptying the firmware update inside it ({fmt_size(total)}), in a temporary copy. The original is not changed.", "info")
+        copy_zeroing(job.path, dest, ranges, self.cso_progress(job, "Preparing"), lambda: self.stop_flag)
+        return dest
+
     def do_iso_to_cso(self, job, o, lz4=False):
         out, _, skip = self.handle_exists(job, self.output_path(job, o, ".zso" if lz4 else ".cso"), o)
         if skip:
             return
         part = out.with_name(out.name + ".part")
+        tmp = out.parent / f".{out.stem[:40]}.chdm_psp"
         self.post("log", f"\n{job.path.name}  [ISO → {'ZSO' if lz4 else 'CSO'}]", "info")
         try:
-            self.write_cso_file(job, o, job.path, part, out, lz4)
+            self.write_cso_file(job, o, self.psp_scrub(job, o, tmp) or job.path, part, out, lz4)
+        except UnpackError as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't prepare)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
         finally:
             part.unlink(missing_ok=True)
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def do_cso_convert(self, job, o, lz4=False):
         """CSO <-> ZSO, through a temporary ISO."""
@@ -10928,11 +11150,17 @@ class App:
         return job.container not in ("zar", "xfolder")
 
     def do_zar_to_iso(self, job, o):
-        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".iso"), o)
+        dest0 = self.output_path(job, o, ".iso")
+        try:
+            if job.path.is_file() and dest0.exists() and os.path.samefile(dest0, job.path):      # an ISO rebuilt next to itself must not replace itself
+                dest0 = dest0.with_name(dest0.stem + " (trimmed).iso")
+        except OSError:
+            pass
+        out, _, skip = self.handle_exists(job, dest0, o)
         if skip:
             return
         part = out.with_name(out.name + ".part")
-        self.post("log", f"\n{job.path.name}  [Xbox 360 → ISO]  (a rebuilt disc image, for emulators)", "info")
+        self.post("log", f"\n{job.path.name}  [{job.platform} → ISO]  (a rebuilt disc image, for emulators)", "info")
         try:
             self.xbox_to_xiso(job, part, self.cso_progress(job, "Building ISO"))
             os.replace(part, out)
