@@ -4565,15 +4565,16 @@ class Job:
                 self.warn = ("it needs your own RPCS3 or your own package key to be unpacked, and neither is set up yet "
                              "(Settings, Formats, PlayStation 3: show it where rpcs3.exe is, or give it your key)")
             return
-        if p.is_dir() and nup_folder_ok(p):                    # a decrypted Switch game (exefs and romfs): can become a NUP
-            tree = nup_tree(p)
+        if p.is_dir() and nup_bundle(p) is not None:           # a decrypted Switch game (exefs/romfs, with its updates and extra content): can become a NUP
+            pkgs = nup_bundle(p)
+            tree = [t for x in pkgs for t in nup_tree(x["root"])]
             self.container, self.platform, self.types = "swfolder", "Switch", ["MODE1"]
             self.zar_raw = sum(t[2] for t in tree)
             self.size, self.src_files = self.zar_raw, [p]
-            self.auto_type, self.reason = "DVD", f"Switch game folder, decrypted ({len(tree)} files)"
-            if nup_title_id(p) is None:
-                self.warn = ("it can't tell which game this is, so it can't be made into a NUP; put the game's 16-digit title id in square brackets "
-                             "in the folder's name, like [0100ABCD12345000]")
+            u, d = sum(1 for x in pkgs if x["kind"] == 1), sum(1 for x in pkgs if x["kind"] == 2)
+            what = ("game" if any(x["kind"] == 0 for x in pkgs) else "no game") + (f" + {u} update{'s' if u != 1 else ''}" if u else "") + (f" + {d} extra content" if d else "")
+            self.auto_type, self.reason = "DVD", f"Switch game folder, decrypted ({what}; {len(tree)} files)"
+            self.warn = nup_resolve(pkgs, p) or ""
             return
         if ext == ".nup" and not p.is_dir():
             try:
@@ -6708,19 +6709,26 @@ def nup_folder_ok(p):
     return p.is_dir() and (p / "exefs").is_dir() and (p / "romfs").is_dir() and ((p / "exefs" / "main").is_file() or (p / "exefs" / "main.npdm").is_file())
 
 
-def nup_title_id(folder):
-    """The game's title id: from main.npdm, else from 16 hex digits in the folder's name; None when neither says."""
-    npdm = Path(folder) / "exefs" / "main.npdm"
+def nup_npdm_id(folder):
+    """The title id inside a folder's exefs/main.npdm (the ACI0 block), or None."""
     try:
-        b = npdm.read_bytes()[:0x1000]
-        if b[:4] == b"META":
-            off = struct.unpack("<I", b[0x70:0x74])[0]
-            if b[off:off + 4] == b"ACI0":
-                tid = struct.unpack("<Q", b[off + 0x10:off + 0x18])[0]
-                if tid:
-                    return tid
+        b = (Path(folder) / "exefs" / "main.npdm").read_bytes()[:0x2000]
+        off = struct.unpack("<I", b[0x70:0x74])[0] if b[:4] == b"META" else -1
+        if b[off:off + 4] != b"ACI0":
+            off = b.find(b"ACI0")
+        if off >= 0:
+            tid = struct.unpack("<Q", b[off + 0x10:off + 0x18])[0]
+            return tid or None
     except (OSError, struct.error):
         pass
+    return None
+
+
+def nup_title_id(folder):
+    """The game's title id: from main.npdm, else from 16 hex digits in the folder's name; None when neither says."""
+    tid = nup_npdm_id(folder)
+    if tid:
+        return tid
     m_ = re.findall(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", Path(folder).name)
     return int(m_[0], 16) if m_ else None
 
@@ -6746,29 +6754,87 @@ def nup_tree(folder):
     return out
 
 
-def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: False, level=3):
-    """A decrypted Switch game folder -> a .nup (one base package). Writes the blob first, then the table, then the superblock."""
+def nup_content_ok(d):
+    """A folder that holds a game's files: an exefs or romfs folder with at least one file in it."""
+    d = Path(d)
+    return d.is_dir() and any((d / x).is_dir() and any(f for _dp, _dn, fn in os.walk(d / x) for f in fn) for x in ("exefs", "romfs"))
+
+
+def nup_bundle(p):
+    """The packages in a game folder -> [{'kind', 'version', 'root', 'tid'}] or None. Either the layout the NUP tools use (base/, updates/<version>/,
+    dlc/<16-digit id>/<n>/, each holding exefs and/or romfs), or a plain game folder (exefs beside romfs)."""
+    p = Path(p)
+    if not p.is_dir():
+        return None
+    pk = []
+    if nup_content_ok(p / "base"):
+        pk.append({"kind": 0, "version": 0, "root": p / "base", "tid": None})
+    u = p / "updates"
+    if u.is_dir():
+        for d in sorted(os.listdir(u)):
+            if re.fullmatch(r"\d+", d) and nup_content_ok(u / d):
+                pk.append({"kind": 1, "version": int(d), "root": u / d, "tid": None})
+    dl = p / "dlc"
+    if dl.is_dir():
+        for d in sorted(os.listdir(dl)):
+            if re.fullmatch(r"[0-9A-Fa-f]{16}", d) and (dl / d).is_dir():
+                for ix in sorted(os.listdir(dl / d)):
+                    if nup_content_ok(dl / d / ix):
+                        pk.append({"kind": 2, "version": 0, "root": dl / d / ix, "tid": int(d, 16)})
+    if pk:
+        return pk
+    if nup_folder_ok(p):
+        m_ = re.search(r"\[v(\d+)\]", p.name)
+        return [{"kind": 0, "version": int(m_.group(1)) if m_ else 0, "root": p, "tid": None}]
+    return None
+
+
+def nup_resolve(pkgs, folder):
+    """Works out each package's title id: the game's from its main.npdm (or the id in the folder's name), an update's from its own main.npdm
+    (or the game's), extra content's from its folder name. -> None when all are known, else a plain sentence about what is missing."""
+    base = next((x for x in pkgs if x["kind"] == 0), None)
+    btid = nup_title_id(base["root"]) if base else None
+    if btid is None:
+        m_ = re.findall(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", Path(folder).name)
+        btid = int(m_[0], 16) if m_ else None
+    for x in pkgs:
+        if x["kind"] == 0:
+            x["tid"] = btid
+        elif x["kind"] == 1:
+            own = nup_npdm_id(x["root"])
+            x["tid"] = own or btid
+    if any(x["tid"] is None for x in pkgs):
+        return ("it can't tell which game this is; put the game's 16-digit title id in square brackets in the folder's name, "
+                "like [0100ABCD12345000]")
+    return None
+
+
+def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
+    """Packages (from nup_bundle, ids from nup_resolve) -> a .nup: the game, its updates, its extra content, each package with its own tree of files.
+    Writes the files first, then the table, then the superblock."""
     import hashlib
     z = _zstd()
-    folder = Path(folder)
-    files = nup_tree(folder)
-    if not files:
+    allf = []                                                # (package number, path parts, file, size)
+    for pi, x in enumerate(pkgs):
+        for parts, fp, size in nup_tree(x["root"]):
+            allf.append((pi, parts, fp, size))
+    if not allf:
         raise UnpackError("the folder has no files in it")
-    # the tree: directories in the order they are first met, files numbered after them
-    dirs = {(): {"name": f"{title_id:016x}", "dirs": set(), "files": []}}
-    for parts, fp, size in files:
+    dirs = {}
+    for pi, x in enumerate(pkgs):
+        dirs[(pi,)] = {"name": f"{x['tid']:016x}", "dirs": set(), "files": []}
+    for pi, parts, fp, size in allf:
         for k in range(1, len(parts)):
-            key = parts[:k]
+            key = (pi,) + parts[:k]
             if key not in dirs:
-                dirs[key] = {"name": key[-1], "dirs": set(), "files": []}
+                dirs[key] = {"name": parts[k - 1], "dirs": set(), "files": []}
                 dirs[key[:-1]]["dirs"].add(key)
-        dirs[parts[:-1]]["files"].append(parts)
-    order = sorted(dirs, key=lambda k: (len(k), [x.encode() for x in k]))        # the root first
+        dirs[(pi,) + parts[:-1]]["files"].append((pi,) + parts)
+    order = sorted(dirs, key=lambda k: (k[0], len(k), [s.encode() for s in k[1:]]))
     dix = {k: i for i, k in enumerate(order)}
-    fix = {f[0]: i for i, f in enumerate(files)}
-    nd, nf = len(order), len(files)
-    pool = bytearray()
-    names = {}
+    fix = {(pi,) + parts: i for i, (pi, parts, _fp, _sz) in enumerate(allf)}
+    nd, nf = len(order), len(allf)
+    pool, names = bytearray(), {}
 
     def intern(s):
         b = s.encode("utf-8")
@@ -6781,18 +6847,14 @@ def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: Fals
         d = dirs[k]
         kids = [(x[-1].encode(), dix[x]) for x in d["dirs"]] + [(f[-1].encode(), nd + fix[f]) for f in d["files"]]
         kids.sort()
-        no, nl = intern(d["name"]) if k else intern(d["name"])
+        no, nl = intern(d["name"])
         dir_rec.append([no, nl, len(children), len(kids)])
         children += [i for _n, i in kids]
-    file_names = [intern(f[0][-1]) for f in files]
-    root = dix[()]
-    exe, rom = dix.get(("exefs",), 0xFFFFFFFF), dix.get(("romfs",), 0xFFFFFFFF)
-    npdm = folder / "exefs" / "main.npdm"
-    meta = b""
-    if npdm.is_file() and npdm.stat().st_size < 1 << 20:
-        nb = npdm.read_bytes()
-        meta = struct.pack("<HHI", 1, 0, len(nb)) + nb
-    pkg_off, dir_off = 0x30, 0x30 + 0x40
+    file_names = [intern(parts[-1]) for _pi, parts, _fp, _sz in allf]
+    has_base = any(x["kind"] == 0 for x in pkgs)
+    npk = len(pkgs)
+    pkg_off = 0x30
+    dir_off = pkg_off + 0x40 * npk
     file_off = dir_off + 0x18 * nd
     child_off = file_off + 0x50 * nf
     pool_off = child_off + 4 * len(children)
@@ -6801,18 +6863,23 @@ def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: Fals
     toc_size = pool_off + pool_size
     blob_off = 0x80 + toc_size
     blob_off += -blob_off % 16
-    uuid = hashlib.sha256(struct.pack("<QIB", title_id, version, 0)).digest()[:16]
+    uuid = hashlib.sha256(b"".join(struct.pack("<QIB", x["tid"], x["version"], x["kind"]) for x in pkgs)).digest()[:16]
     ext = [None] * nf
-    meta_off = 0
+    metas = []
     with open(dest, "wb") as out:
         out.seek(blob_off)
-        if meta:
-            meta_off = out.tell()
-            out.write(meta)
-            out.write(bytes(-out.tell() % 16))
-        total, done = max(1, sum(f[2] for f in files)), 0
+        for x in pkgs:                                       # each package's main.npdm goes in its meta block
+            npdm = Path(x["root"]) / "exefs" / "main.npdm"
+            if npdm.is_file() and npdm.stat().st_size < 1 << 20:
+                nb = npdm.read_bytes()
+                metas.append((out.tell(), 8 + len(nb)))
+                out.write(struct.pack("<HHI", 1, 0, len(nb)) + nb)
+                out.write(bytes(-out.tell() % 16))
+            else:
+                metas.append((0, 0))
+        total, done = max(1, sum(f[3] for f in allf)), 0
         cctx = z.ZstdCompressor(level=level)
-        for i, (parts, fp, size) in enumerate(files):
+        for i, (pi, parts, fp, size) in enumerate(allf):
             if size == 0:
                 ext[i] = (0, 0, hashlib.sha256(b"").digest(), 0)
                 continue
@@ -6846,13 +6913,15 @@ def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: Fals
                 csize, codec = size, 0
             out.write(bytes(-out.tell() % 16))
             ext[i] = (start, csize, h.digest(), codec)
-        # the table
         toc = bytearray()
-        toc += b"TOC\x01" + struct.pack("<IQQQQQ", 1, nd, nf, pool_off, pool_size, 0)
-        toc += struct.pack("<QIIIIBBHI", title_id, root, exe, rom, version, 0, 0, 0, 0) + struct.pack("<QI", meta_off, len(meta)) + bytes(20)
+        toc += b"TOC\x01" + struct.pack("<IQQQQQ", npk, nd, nf, pool_off, pool_size, 0)
+        for pi, x in enumerate(pkgs):
+            standalone = 1 if (x["kind"] == 1 and not has_base) else 0
+            toc += struct.pack("<QIIIIBBHI", x["tid"], dix[(pi,)], dix.get((pi, "exefs"), 0xFFFFFFFF), dix.get((pi, "romfs"), 0xFFFFFFFF),
+                               x["version"], x["kind"], standalone, 0, 0) + struct.pack("<QI", metas[pi][0], metas[pi][1]) + bytes(20)
         for no, nl, fc, cc in dir_rec:
             toc += struct.pack("<IIIIQ", no, nl, fc, cc, 0)
-        for (parts, fp, size), (no, nl), (eo, es, sh, codec) in zip(files, file_names, ext):
+        for (pi, parts, fp, size), (no, nl), (eo, es, sh, codec) in zip(allf, file_names, ext):
             toc += struct.pack("<IIQQQ", no, nl, size, eo, es) + sh + struct.pack("<BBH", codec, 0, 0) + bytes(12)
         for c in children:
             toc += struct.pack("<I", c)
@@ -6864,7 +6933,7 @@ def build_nup(folder, dest, title_id, version=0, prog=None, stopped=lambda: Fals
         sup[4:0x18] = struct.pack("<HHQQ", 0x80, 1, 0x80, toc_size)
         sup[0x18:0x38] = hashlib.sha256(bytes(toc)).digest()
         sup[0x38:0x48] = struct.pack("<QQ", blob_off, end)
-        sup[0x48:0x4C] = struct.pack("<I", 1)
+        sup[0x48:0x4C] = struct.pack("<I", npk)
         sup[0x4C:0x50] = struct.pack("<I", 0)
         sup[0x50:0x60] = uuid
         out.seek(0)
@@ -6975,36 +7044,57 @@ def nup_open(path):
     return pk, files, tree, read_file, f.close
 
 
-def nup_verify(path, folder, prog, stopped):
-    """Reads a finished NUP back: the same files in the same places as the folder, each one checked against its checksum."""
+def nup_layout(pk):
+    """Where each package's files go when a NUP is unpacked: a lone game goes straight into the folder; anything else uses the layout the NUP
+    tools read back (base/, updates/<version>/, dlc/<id>/<n>/)."""
+    if len(pk) == 1 and pk[0]["kind"] == 0:
+        return [()]
+    out, dlc = [], {}
+    for p in pk:
+        if p["kind"] == 0:
+            out.append(("base",))
+        elif p["kind"] == 1:
+            out.append(("updates", str(p["version"])))
+        else:
+            k = dlc.get(p["title_id"], 0)
+            dlc[p["title_id"]] = k + 1
+            out.append(("dlc", f"{p['title_id']:016x}", str(k)))
+    return out
+
+
+def nup_verify(path, pkgs, prog, stopped):
+    """Reads a finished NUP back: the same packages with the same files in the same places as the folders they came from, each file checked
+    against its checksum."""
     pk, files, tree, read_file, close = nup_open(path)
     try:
-        if len(pk) != 1:
-            raise UnpackError("the NUP that was built doesn't hold one package; it was discarded")
-        want = {tuple(p_): sz for p_, _fp, sz in nup_tree(folder)}
-        got = {parts: files[fi]["size"] for parts, is_file, fi in tree(0) if is_file}
-        if want != got:
-            raise UnpackError("the NUP that was built doesn't list the same files as the folder; it was discarded")
-        total, done = max(1, sum(want.values())), 0
-        for parts, is_file, fi in tree(0):
-            if is_file:
-                for b in read_file(fi):
-                    if stopped():
-                        raise UnpackError("stopped")
-                    done += len(b)
-                    prog(min(1.0, done / total))
+        if len(pk) != len(pkgs):
+            raise UnpackError("the NUP that was built doesn't hold the same packages as the folder; it was discarded")
+        for pi, x in enumerate(pkgs):
+            want = {tuple(p_): sz for p_, _fp, sz in nup_tree(x["root"])}
+            got = {parts: files[fi]["size"] for parts, is_file, fi in tree(pi) if is_file}
+            if want != got:
+                raise UnpackError("the NUP that was built doesn't list the same files as the folder; it was discarded")
+        total, done = max(1, sum(f["size"] for f in files)), 0
+        for pi in range(len(pk)):
+            for parts, is_file, fi in tree(pi):
+                if is_file:
+                    for b in read_file(fi):
+                        if stopped():
+                            raise UnpackError("stopped")
+                        done += len(b)
+                        prog(min(1.0, done / total))
     finally:
         close()
 
 
 def nup_extract(path, dest, prog=None, stopped=lambda: False):
-    """A .nup -> a folder: a single package's files directly in it, several packages each in a folder of its own."""
+    """A .nup -> a folder (see nup_layout). Every file is checked against its checksum as it is written."""
     pk, files, tree, read_file, close = nup_open(path)
     dest = Path(dest)
     try:
         total, done = max(1, sum(f["size"] for f in files)), 0
-        for pi, p in enumerate(pk):
-            base = dest if len(pk) == 1 else dest / f"{p['title_id']:016X} ({NUP_KINDS.get(p['kind'], 'package')})"
+        for pi, prefix in enumerate(nup_layout(pk)):
+            base = dest.joinpath(*prefix)
             for parts, is_file, fi in tree(pi):
                 if any(x in ("", ".", "..") or "/" in x or "\\" in x or ":" in x for x in parts):
                     raise UnpackError("this NUP file holds a file name that isn't safe to unpack, so nothing was written")
@@ -7811,7 +7901,7 @@ DEFAULTS = {
     "chdman": "", "compression": "Default", "custom_comp": "", "hunk": "", "threads": 0,
     "exists": "Skip", "verify_after": True, "delete_src": False, "delete_forever": False, "auto_cue": True, "make_m3u": True, "space_check": True, "ps3_split": False, "ps3_update": False,
     "extract_subfolder": False,
-    "out_mode": "same", "out_dir": "", "keep_structure": True, "last_dir": "", "geometry": "",
+    "out_mode": "same", "out_dir": "", "keep_structure": False, "last_dir": "", "geometry": "",
     "base_pbp": "", "base_pbp_ask": True, "pbp_level": 6, "rvz_method": "zstd", "rvz_level": 5, "rvz_chunk": 131072, "wbfs_scrub": True, "dolphintool": "", "rpcs3": "", "pkg_key": "", "switch_keys": "", "wii_common_key": "", "wii_korean_key": "", "wii_warn_off": False, "linux_help_off": False, "art_dir": "", "title_cards": True, "name_format": "%FILENAME%", "auto_log": False, "auto_update_check": True, "theme": "dark", "auto_suggest": True, "low_priority": False, "skip_version": "", "auto_app_check": True,
 }
 
@@ -8008,6 +8098,15 @@ class App:
 
         act = ttk.Frame(root, padding=(18, 8, 18, 8))
         act.pack(fill="x", side="bottom")
+        sv = ttk.Frame(root, padding=(18, 4, 18, 0))                 # "Save to": where the finished files go, right where the work is started
+        sv.pack(fill="x", side="bottom")
+        ttk.Label(sv, text="Save to:").pack(side="left")
+        ttk.Radiobutton(sv, text="next to each original", variable=self.v["out_mode"], value="same").pack(side="left", padx=(8, 4))
+        ttk.Radiobutton(sv, text="this folder:", variable=self.v["out_mode"], value="custom").pack(side="left", padx=(8, 4))
+        self.out_entry = ttk.Entry(sv, textvariable=self.v["out_dir"])
+        self.out_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Button(sv, text="Browse…", command=self.pick_out_dir).pack(side="left")
+        ttk.Checkbutton(sv, text="keep the folders' layout", variable=self.v["keep_structure"]).pack(side="left", padx=(12, 0))
         self.start_btn = ttk.Button(act, text="▶  Start", style="Accent.TButton", command=self.start)
         self.start_btn.pack(side="left")
         self.stop_btn = ttk.Button(act, text="■  Stop", command=self.stop, state="disabled")
@@ -8288,13 +8387,8 @@ class App:
 
         # --- Output
         f = tab("Output")
-        ttk.Radiobutton(f, text="Next to the source file", variable=v["out_mode"], value="same").grid(
-            row=0, column=0, columnspan=3, sticky="w")
-        ttk.Radiobutton(f, text="This folder:", variable=v["out_mode"], value="custom").grid(row=1, column=0, sticky="w")
-        ttk.Entry(f, textvariable=v["out_dir"], width=34).grid(row=1, column=1, padx=6)
-        ttk.Button(f, text="Browse…", command=self.pick_out_dir).grid(row=1, column=2)
-        ttk.Checkbutton(f, text="Keep subfolder structure (for folders you added)", variable=v["keep_structure"]).grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(4, 10))
+        ttk.Label(f, text="Where the finished files go is chosen at the bottom of the main window (“Save to”).", style="Muted.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ttk.Label(f, text="chdman.exe:").grid(row=3, column=0, sticky="w")
         self.chd_path_var = tk.StringVar(value=CHDMAN or "")
         ttk.Entry(f, textvariable=self.chd_path_var, width=34).grid(row=3, column=1, padx=6)
@@ -9517,7 +9611,7 @@ class App:
                 games.append(Path(dp))                          # a PlayStation Store game folder (as RPCS3 keeps it): taken whole
                 dn[:] = []
                 continue
-            if nup_folder_ok(Path(dp)):
+            if nup_bundle(Path(dp)) is not None:
                 games.append(Path(dp))                          # a decrypted Switch game folder (exefs and romfs): taken whole
                 dn[:] = []
                 continue
@@ -11162,26 +11256,26 @@ class App:
 
     def do_folder_to_nup(self, job, o):
         """A decrypted Switch game folder -> a NUP (a community container, zstd compressed, with a checksum for every file). Experimental."""
-        tid = nup_title_id(job.path)
-        if tid is None:
-            job.status, job.result = "Failed (can't build)", ("it can't tell which game this is; put the game's 16-digit title id in square brackets in the folder's name, "
-                                                             "like [0100ABCD12345000]")
+        pkgs = nup_bundle(job.path) or []
+        err = nup_resolve(pkgs, job.path) if pkgs else "it has nothing in it that can go into a NUP"
+        if err:
+            job.status, job.result = "Failed (can't build)", err
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup"), o)
         if skip:
             return
         part = out.with_name(out.name + ".part")
-        mv = re.search(r"\[v(\d+)\]", job.path.name)
-        self.post("log", f"\n{job.path.name}  [game folder → NUP]  (experimental: written from the public draft of the format; not tried in an emulator yet)", "info")
+        names = " + ".join({0: "game", 1: f"update {x['version']}", 2: "extra content"}[x["kind"]] for x in pkgs)
+        self.post("log", f"\n{job.path.name}  [game folder → NUP: {names}]  (experimental: written from the public draft of the format; not tried in an emulator yet)", "info")
         verify = self.verify_wanted()
         prog = self.cso_progress(job, "Building NUP")
         stop = lambda: self.stop_flag  # noqa: E731
         try:
-            build_nup(job.path, part, tid, int(mv.group(1)) if mv else 0, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            build_nup(pkgs, part, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
             if verify:
                 self.post("log", "Reading the new NUP back against the folder…", "info")
-                nup_verify(part, job.path, lambda x: prog(0.6 + x * 0.4), stop)
+                nup_verify(part, pkgs, lambda x: prog(0.6 + x * 0.4), stop)
             os.replace(part, out)
         except (UnpackError, ValueError) as e:
             if self.stop_flag:
