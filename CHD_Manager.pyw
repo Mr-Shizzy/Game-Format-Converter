@@ -9789,7 +9789,10 @@ class App:
                 r = subprocess.run([z, "x", "-y", f"-o{tmp}", str(arc), "-bso0", "-bsp0"], capture_output=True, stdin=subprocess.DEVNULL,
                                    creationflags=CREATE_NO_WINDOW, timeout=6 * 3600)
                 if r.returncode:
-                    raise RuntimeError((r.stderr or r.stdout).decode("utf-8", "replace").strip()[-300:] or f"7-Zip exited with {r.returncode}")
+                    said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
+                    if re.search(r"break signaled|password|encrypted", said, re.I):       # 7-Zip stops like this when it wants a password and gets none
+                        raise RuntimeError("it is password-protected, which CHD Manager can't open. Unpack it yourself first")
+                    raise RuntimeError(said[-300:] or f"7-Zip exited with {r.returncode}")
         if ext in (".7z", ".rar") and not find_7z() and not self.silent and not self.ensure_7zip():
             shutil.rmtree(tmp, ignore_errors=True)
             self.refuse(arc.name, "This kind of archive needs 7-Zip, which isn't installed, so it was not opened.", "warn")
