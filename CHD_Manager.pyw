@@ -5273,6 +5273,7 @@ def psn_folder_info(path):
     except OSError:
         return None
     info = ps3_sfo_info(sfo)
+    info["category"] = str(sfo.get("CATEGORY", ""))
     if str(sfo.get("CATEGORY", "")) == "DG" or not re.fullmatch(r"[A-Z]{4}[0-9]{5}", info["id"]):
         return None
     return info
@@ -5709,10 +5710,15 @@ def pkg_info(path):
             info["patch"] = bool(struct.unpack(">I", body[:4])[0] & 0x10)
         elif pid == 8 and ln >= 8:
             info["version"] = struct.unpack(">H", body[6:8])[0]
+        elif pid == 0x0A and ln > 8:                        # an install folder of its own (extra content that doesn't go into the game's folder)
+            info["install_dir"] = body[8:].split(b"\0")[0].decode("utf-8", "replace")
         off += 8 + ln
     cid = info["content_id"]
     info["dlc"] = info["content_type"] == 4                    # extra content for a game (installs into the game's own folder)
     info["title_id"] = cid[7:16] if len(cid) >= 16 and cid[6] == "-" else cid
+    info["install_dir"] = info.get("install_dir") or info["title_id"]       # the folder under dev_hdd0/game it installs into (RPCS3: the game ID unless told otherwise)
+    if not info["install_dir"] or info["install_dir"] in (".", "..") or re.search(r"[/\\]", info["install_dir"]):
+        raise ValueError("this package names an install folder that isn't a plain folder name, so it was not trusted")
     if info["content_type"] not in PKG_CONTENT:
         what = PKG_OTHER.get(info["content_type"], f"a kind of package (type {info['content_type']})")
         raise ValueError(f"this package holds {what}, not a PlayStation 3 game or its update, so there is no game folder to unpack")
@@ -5867,7 +5873,7 @@ def pkg_content_id(title_id, title=""):
     return f"{PKG_REGION.get(title_id[2:3], 'UP')}9000-{title_id}_00-{label}"
 
 
-def build_pkg(ents, read, dest, key, content_id, prog, stopped, content_type=5):
+def build_pkg(ents, read, dest, key, content_id, prog, stopped, content_type=5, install_dir=""):
     """Entries [(path parts as bytes, is_file, src, size)] (a PSN-style game folder: PARAM.SFO and USRDIR at the top) -> a retail-layout
     package at dest, sealed with the user's own key. For RPCS3: a console would also want Sony's signature, which nobody can make."""
     enc = aes_ecb(key)
@@ -5895,12 +5901,14 @@ def build_pkg(ents, read, dest, key, content_id, prog, stopped, content_type=5):
     meta = b"".join(struct.pack(">II", pid, len(v)) + v for pid, v in (
         (1, struct.pack(">I", 2)), (2, struct.pack(">I", content_type)), (3, struct.pack(">I", 0x4e)), (4, struct.pack(">Q", data_size)),
         (5, bytes.fromhex("15000100")), (8, bytes.fromhex("8102500001000100")), (9, bytes(8))))
-    meta += bytes(160 - len(meta))
+    if install_dir:                                       # extra content that installs into a folder of its own
+        meta += struct.pack(">II", 0x0A, 8 + len(install_dir.encode()) + 1) + bytes(8) + install_dir.encode() + b"\0"
+    meta += bytes(64)                                      # (real packages keep a 64-byte signature block after the packets)
     data_off = 0xC0 + len(meta)
     total = data_off + data_size + PKG_TRAILER
     head = bytearray(0xC0)
     head[0:4] = b"\x7fPKG"
-    struct.pack_into(">HHIIIIQQQ", head, 4, 0x8000, 1, 0xC0, 7, len(meta), n, total, data_off, data_size)
+    struct.pack_into(">HHIIIIQQQ", head, 4, 0x8000, 1, 0xC0, 8 if install_dir else 7, len(meta), n, total, data_off, data_size)
     cid = content_id.encode("ascii")
     head[0x30:0x30 + len(cid)] = cid
     head[0x70:0x80] = iv
@@ -8215,7 +8223,8 @@ class App:
                              and not j.status.startswith("Done")), None)
                 if mate is not None:
                     new = job.pkgs[0]
-                    twin = next((i for i in mate.pkgs if i["content_id"] == new["content_id"] and i["patch"] == new["patch"] and i["version"] == new["version"]), None)
+                    twin = next((i for i in mate.pkgs if i["content_id"] == new["content_id"] and i["install_dir"] == new["install_dir"] and i["patch"] == new["patch"]
+                                  and i["version"] == new["version"]), None)
                     if twin is not None:
                         self.refuse(f.name, sentence(f"it is the same package as {twin['path'].name}, which is already in the list"), "warn")
                         continue
@@ -9745,8 +9754,8 @@ class App:
                                                                "and show it where rpcs3.exe is, or give it your key")
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
-        if not any(not i["patch"] and not i["dlc"] for i in job.pkgs):
-            job.status, job.result = "Failed (no game)", "only an update or extra content was added. Add the game's own package too (the one that isn't an update or DLC)"
+        if all(i["patch"] for i in job.pkgs):
+            job.status, job.result = "Failed (no game)", "only an update was added. Add the game's own package too (the one that isn't an update)"
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         out, skip = self.folder_target(job, o)
@@ -9806,7 +9815,7 @@ class App:
                                       ". (Is this RPCS3 recent enough, and is the package complete?)"))
                 seen.append(m.group(1))
             games = work / "dev_hdd0" / "game"
-            ids = [x for x in dict.fromkeys(seen) if (games / x).is_dir()]
+            ids = sorted(d.name for d in games.iterdir() if d.is_dir() and d.name.replace("＄", "$") != "$locks" and d.name != "TEST12345")
             if not ids:
                 raise UnpackError("RPCS3 said it installed the package, but no game folder appeared")
             if len(ids) == 1:
@@ -9845,23 +9854,27 @@ class App:
         ok = False
         try:
             work.mkdir(parents=True)
+            used = {}                                       # install folder -> how many packages went into it
             for k, info in enumerate(job.pkgs):
-                self.post("log", f"Package {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else "  (DLC)" if info["dlc"] else ""), "info")
+                dest = work / info["install_dir"]
+                dest.mkdir(exist_ok=True)
+                first = not used.get(info["install_dir"])
+                used[info["install_dir"]] = used.get(info["install_dir"], 0) + 1
+                self.post("log", f"Package {k + 1} of {n}: {info['path'].name}" + ("  (update)" if info["patch"] else "  (extra content)" if info["dlc"] else "")
+                          + (f"  → folder {info['install_dir']}" if info["install_dir"] != info["title_id"] else ""), "info")
                 ents, read, close = pkg_source(info, key)
                 try:
-                    if k:          # a file that is already there is only replaced when the update says so (as the console does)
-                        keep = []
-                        for e in ents:
-                            tgt = work.joinpath(*[x.decode("utf-8", "replace") for x in e[0]])
-                            if e[1] and tgt.exists() and not e[2][1]:
-                                continue
-                            keep.append(e)
-                        ents = keep
-                    self.unpack_entries(job, ents, read, work, lambda x, k=k: base((k + x) / n), "utf-8", lambda r: ps3_folder_source(r, True),
-                                        verify=self.verify_wanted() and k == 0)
+                    if not first:          # a file that is already there is only replaced when the package says so (as the console does)
+                        ents = [e for e in ents if not (e[1] and dest.joinpath(*[x.decode("utf-8", "replace") for x in e[0]]).exists() and not e[2][1])]
+                    self.unpack_entries(job, ents, read, dest, lambda x, k=k: base((k + x) / n), "utf-8", lambda r: ps3_folder_source(r, True),
+                                        verify=self.verify_wanted() and first)
                 finally:
                     close()
-            os.replace(work, out)
+            if len(used) == 1:
+                os.replace(work / next(iter(used)), out)
+                shutil.rmtree(work, ignore_errors=True)
+            else:                                           # the packages put files in more than one folder: each keeps a folder of its own
+                os.replace(work, out)
             ok = True
         except PkgKeyError as e:
             job.status, job.result = "Failed (wrong key)", str(e)
@@ -9907,7 +9920,13 @@ class App:
         stop = lambda: self.stop_flag  # noqa: E731
         ents, read, close = ps3_folder_source(job.path, True)
         try:
-            build_pkg(ents, read, part, key, cid, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            folder = job.path.name
+            odd = folder.upper() != info["id"].upper()
+            if odd and (not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", folder)):
+                raise UnpackError("this folder's name is used as the folder the package installs into, and it has characters that can't be used there "
+                                  "(letters, numbers, - and _ only); rename the folder first")
+            build_pkg(ents, read, part, key, cid, lambda x: prog(x * (0.6 if verify else 1.0)), stop,
+                      content_type=4 if info.get("category") == "GD" else 5, install_dir=folder if odd else "")
             if verify:
                 self.post("log", "Reading the new package back against the folder…", "info")
                 e2, r2, c2 = pkg_source(pkg_info(part), key)
