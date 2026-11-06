@@ -8068,7 +8068,8 @@ CTX_CD = (".cue", ".gdi", ".toc", ".bin", ".mds", ".mdf", ".nrg", ".ccd", ".img"
 CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "verify", "recompress") for e in CTX_CD},
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
-               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",)}
+               ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",), ".3ds": ("z3ds",), ".cci": ("z3ds",), ".cxi": ("z3ds",), ".3dsx": ("z3ds",),
+               ".zcci": ("unz3ds",), ".zcxi": ("unz3ds",), ".z3dsx": ("unz3ds",)}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
