@@ -1,5 +1,5 @@
 <#
-  Builds the portable release:  dist\CHD Manager\  (CHD Manager.exe + chdman.exe + gameInfo.db + licenses)
+  Builds the portable release:  dist\Game Format Converter\  (CHD Manager.exe + chdman.exe + gameInfo.db + licenses)
   a zip of it:                  dist\CHD-Manager-<version>-win64.zip
   and the source zip:           dist\CHD-Manager-<version>-source.zip   (CHD_Manager.pyw + chd-manager.sh + licenses + README)
 
@@ -94,7 +94,7 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$root\build\exe\CHD Manager.exe")) 
 
 # ---- 5. portable folder + zip
 $ver = (Select-String -Path "$root\CHD_Manager.pyw" -Pattern '^APP_VER\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
-$out = "$root\dist\CHD Manager"
+$out = "$root\dist\Game Format Converter"
 Remove-Item "$root\dist" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $out | Out-Null
 Copy-Item "$root\build\exe\CHD Manager.exe" $out
@@ -116,7 +116,7 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         data = open(os.path.join(root, name), "rb").read()
         if name.endswith(".sh"):
             data = data.replace(b"\r\n", b"\n")
-        zi = zipfile.ZipInfo("CHD-Manager/" + name, date_time=(2026, 1, 1, 0, 0, 0))
+        zi = zipfile.ZipInfo("Game-Format-Converter/" + name, date_time=(2026, 1, 1, 0, 0, 0))
         zi.compress_type = zipfile.ZIP_DEFLATED
         zi.external_attr = ((0o755 if name.endswith(".sh") else 0o644) | 0o100000) << 16
         z.writestr(zi, data)

@@ -1,5 +1,5 @@
 """
-CHD Manager - convert game disc images between formats (CHD, PBP, CSO/ZSO, ECM, RVZ, WBFS and more)
+Game Format Converter (formerly CHD Manager) - convert game images and files between formats (CHD, PBP, CSO/ZSO, ECM, RVZ, WBFS, Xbox, PS3, Switch, 3DS and more)
 
 Put this file next to chdman.exe (or point it at chdman.exe in Settings, Output page).
 Needs only Python 3 (tkinter is included with it). Double-click to run.
@@ -38,7 +38,7 @@ from ctypes import wintypes
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-APP_NAME = "CHD Manager"
+APP_NAME = "Game Format Converter"
 APP_VER = "2.1.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -545,10 +545,11 @@ def delete_forever(paths):
     return ok
 
 
-# ------------------------------------------------- CHD Manager's own updates (GitHub releases)
+# ------------------------------------------------- Game Format Converter's own updates (GitHub releases)
 APP_REPO = "Mr-Shizzy/CHD-Manager"
 APP_RELEASE_API = f"https://api.github.com/repos/{APP_REPO}/releases/latest"
 APP_URL_PREFIX = f"https://github.com/{APP_REPO}/"
+APP_OWNER_PREFIX = "https://github.com/Mr-Shizzy/"        # a renamed repo keeps this owner: its downloads are still trusted (and still need the checksum)
 SWAP_BAT = """@echo off
 setlocal
 set "NEW={new}"
@@ -583,7 +584,7 @@ def parse_app_release(data, kind):
     win64: the first 64-hex text in the notes is the zip's SHA-256 (the convention every released updater already reads).
     source: the SHA-256 is on the line of the notes that names the source zip ('<hash>  CHD-Manager-x-source.zip').
     A release without a source zip still parses (url is empty): the update can be announced, just not installed by itself."""
-    pat = r"CHD-Manager-.+-win64\.zip" if kind == "win64" else r"CHD-Manager-.+-source\.zip"
+    pat = r"(?:CHD-Manager|Game-Format-Converter)-.+-win64\.zip" if kind == "win64" else r"(?:CHD-Manager|Game-Format-Converter)-.+-source\.zip"
     asset = next((a for a in data.get("assets", []) if re.fullmatch(pat, a["name"])), None)
     body = data.get("body") or ""
     if kind == "win64":
@@ -600,7 +601,7 @@ def parse_app_release(data, kind):
                     if m:
                         sha = m.group(1)
                         break
-    if asset and not asset["browser_download_url"].startswith(APP_URL_PREFIX):
+    if asset and not asset["browser_download_url"].startswith(APP_OWNER_PREFIX):
         raise RuntimeError("Unexpected download address: " + asset["browser_download_url"])
     return {"tag": data["tag_name"], "name": asset["name"] if asset else "", "url": asset["browser_download_url"] if asset else "",
             "size": asset["size"] if asset else 0, "sha": sha, "page": data.get("html_url", APP_URL_PREFIX + "releases"),
@@ -608,7 +609,7 @@ def parse_app_release(data, kind):
 
 
 def fetch_app_release():
-    """Latest CHD Manager release -> dict(tag, name, url, size, sha, page, notes, kind)."""
+    """Latest Game Format Converter release -> dict(tag, name, url, size, sha, page, notes, kind)."""
     with http_get(APP_RELEASE_API) as r:
         data = json.loads(r.read().decode("utf-8"))
     return parse_app_release(data, app_asset_kind())
@@ -618,7 +619,7 @@ def stage_app_update(info, dest_dir, progress=None):
     """Download the release zip, verify its SHA-256, and save the new exe next to the current one as
     'CHD Manager.new.exe'. Returns that path. Refuses anything without a matching checksum."""
     import zipfile
-    if not info["url"].startswith(APP_URL_PREFIX):
+    if not info["url"].startswith(APP_OWNER_PREFIX):
         raise RuntimeError("Unexpected download address.")
     if not info["sha"]:
         raise RuntimeError("This release has no published checksum, so it can't be verified. Download it by hand.")
@@ -640,12 +641,13 @@ def stage_app_update(info, dest_dir, progress=None):
             raise RuntimeError("Checksum mismatch - the download was discarded.")
         with zipfile.ZipFile(zpath) as z:
             names = {Path(n).name: n for n in z.namelist() if not n.endswith("/")}
-            if "CHD Manager.exe" not in names:
+            exe_name = next((n for n in ("CHD Manager.exe", "Game Format Converter.exe") if n in names), None)     # the file is still called by its old name; a later release may use the new one
+            if not exe_name:
                 raise RuntimeError("The zip does not contain CHD Manager.exe.")
-            exe_bytes = z.read(names["CHD Manager.exe"])
+            exe_bytes = z.read(names[exe_name])
             extras = {n: z.read(names[n]) for n in ("LICENSE", "THIRD_PARTY_NOTICES.txt") if n in names}
         if exe_bytes[:2] != b"MZ":
-            raise RuntimeError("CHD Manager.exe in the zip is not a Windows program.")
+            raise RuntimeError(f"{exe_name} in the zip is not a Windows program.")
         new = dest_dir / "CHD Manager.new.exe"
         new.write_bytes(exe_bytes)
         for n, b in extras.items():
@@ -672,7 +674,7 @@ def fetch_source_update(info, progress=None, opener=None):
     name and anything bigger than expected. Nothing is written to the program folder here."""
     import zipfile
     opener = opener or http_get
-    if not info.get("url", "").startswith(APP_URL_PREFIX):
+    if not info.get("url", "").startswith(APP_OWNER_PREFIX):
         raise RuntimeError("Unexpected download address.")
     if not info.get("sha"):
         raise RuntimeError("This release has no published checksum, so it can't be verified. Download it by hand.")
@@ -732,7 +734,7 @@ def install_source_update(files, dest_dir):
     every file is put back as it was. Settings, keys, chdman and anything else in the folder are not touched."""
     dest = Path(dest_dir)
     if not os.access(dest, os.W_OK):
-        raise RuntimeError("CHD Manager's folder can't be written to (it may belong to another user or a package), so it can't update itself.")
+        raise RuntimeError("Game Format Converter's folder can't be written to (it may belong to another user or a package), so it can't update itself.")
     backup = dest / SOURCE_BACKUP
     order = [n for n in files if n != "CHD_Manager.pyw"] + ["CHD_Manager.pyw"]     # the program itself goes last
     staged, done = {}, []
@@ -2689,7 +2691,7 @@ WII_KEYS = [None, None]                  # the Wii common key and the Korean one
 WII_TOOL = [""]                          # the user's DolphinTool.exe, when there is one
 WII_SCRUB = [True]
 KEYS_DIR = HERE / "keys"
-KEYS_README = """Put your own Wii keys in this folder. CHD Manager doesn't contain them and never downloads them.
+KEYS_README = """Put your own Wii keys in this folder. Game Format Converter doesn't contain them and never downloads them.
 
 A file here can be called anything ending in .txt, .key, .bin or .hex. It holds the key as 32 hexadecimal
 characters (16 bytes), for example one line:
@@ -3765,7 +3767,7 @@ def verify_pbp(path, layouts, progress, stopped):
 
 
 # A PBP only runs on a real PSP/Vita if it carries Sony's PS1 loader, which can't be made from a disc and is not
-# shipped with CHD Manager. The user can point the app at any working PS1 PBP, or let it fetch this generic one
+# shipped with Game Format Converter. The user can point the app at any working PS1 PBP, or let it fetch this generic one
 # (pinned to one commit of the public repository and checked against a fixed checksum).
 BASE_PBP_FILES = [   # (name, url, sha-256)
     ("BASE.PBP", "https://raw.githubusercontent.com/julianxhokaxhiu/iPoPS/f8afadd32e9e55e0ea9bf73cf3306890ffebe629/BASE.PBP",
@@ -4032,7 +4034,7 @@ def read_cso_header(path):
     if h[:4] == b"CISO" and ciso_is_wii(hsize):
         raise UnpackError("this is a GameCube/Wii CISO, not a PSP CSO")
     if ver > (2 if h[:4] == b"CISO" else 1) or block < 512 or block & (block - 1) or shift > 8 or not total:
-        raise UnpackError("this CSO uses a version or layout CHD Manager can't read")
+        raise UnpackError("this CSO uses a version or layout Game Format Converter can't read")
     return total, block, shift
 
 
@@ -4641,7 +4643,7 @@ class Job:
                 self.reason = "Nintendo 3DS file"
                 if enc:
                     self.warn = ("this dump looks encrypted. It can still be compressed, but the Azahar emulator only runs decrypted dumps "
-                                 "(CHD Manager doesn't decrypt anything)")
+                                 "(Game Format Converter doesn't decrypt anything)")
             self.container, self.platform, self.types = "z3ds", "3DS", ["MODE1"]
             self.size, self.src_files = p.stat().st_size, [p]
             self.auto_type = "DVD"
@@ -5315,7 +5317,7 @@ def z3ds_pack(src, dest, magic, prog, stopped, level=3):
     zs = _zs()
     usize = os.path.getsize(src)
     meta = bytearray([1])
-    notes = [("compressor", f"CHD Manager {APP_VER}".encode()), ("date", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()).encode()),
+    notes = [("compressor", f"Game Format Converter {APP_VER}".encode()), ("date", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()).encode()),
              ("maxframesize", str(Z3_FRAME).encode())]
     ti = z3ds_titleinfo(src, magic)
     if ti:
@@ -5437,7 +5439,7 @@ def cci_parts(path):
             if len(h) < 0x200 or h[0x100:0x104] != b"NCCH":
                 raise ValueError("this 3DS dump is damaged (a part of it can't be read)")
             if not h[0x18F] & 4:
-                raise ValueError("this 3DS dump is encrypted, and a CIA can only be made from a decrypted one (CHD Manager doesn't decrypt anything)")
+                raise ValueError("this 3DS dump is encrypted, and a CIA can only be made from a decrypted one (Game Format Converter doesn't decrypt anything)")
             size = struct.unpack_from("<I", h, 0x104)[0] * 0x200
             if not size or size > units * 0x200 or (off * 0x200 + size) > os.path.getsize(path):
                 raise ValueError("this 3DS dump is damaged or cut short (a part is bigger than the file)")
@@ -5628,7 +5630,7 @@ def cia_parts(path):
             if idx >= 0x10000 or not mask[idx // 8] & (0x80 >> (idx % 8)):
                 continue
             if ctp & 1:
-                raise ValueError("this CIA is encrypted, and a game image can only be made from a decrypted one (CHD Manager doesn't decrypt anything)")
+                raise ValueError("this CIA is encrypted, and a game image can only be made from a decrypted one (Game Format Converter doesn't decrypt anything)")
             if idx > 2:
                 raise ValueError("this CIA holds parts a game image can't carry")
             if not csize or pos + csize > size:
@@ -5638,7 +5640,7 @@ def cia_parts(path):
             if len(h) < 0x200 or h[0x100:0x104] != b"NCCH":
                 raise ValueError("this CIA is damaged (a part of it can't be read)")
             if not h[0x18F] & 4:
-                raise ValueError("this CIA is encrypted, and a game image can only be made from a decrypted one (CHD Manager doesn't decrypt anything)")
+                raise ValueError("this CIA is encrypted, and a game image can only be made from a decrypted one (Game Format Converter doesn't decrypt anything)")
             out.append((idx, pos, csize))
             pos = _align(pos + csize)
     if not out or out[0][0] != 0:
@@ -8279,8 +8281,8 @@ LINUX_PKGS = {"chdman": {"apt": "mame-tools", "dnf": "mame-tools", "pacman": "ma
               "tkdnd": {"apt": "tkdnd", "dnf": "tkdnd"},
               "zstandard": {"apt": "python3-zstandard", "dnf": "python3-zstandard", "pacman": "python-zstandard"}}
 LINUX_WHY = {
-    "chdman": ("CHD Manager is the friendly front end. chdman, part of MAME's tools, is the program that actually makes and reads "
-               "CHD files, and CHD Manager asks it to do that work. Without chdman nothing can be turned into a CHD or back, and most "
+    "chdman": ("Game Format Converter is the friendly front end. chdman, part of MAME's tools, is the program that actually makes and reads "
+               "CHD files, and Game Format Converter asks it to do that work. Without chdman nothing can be turned into a CHD or back, and most "
                "other conversions, which pass through a CHD on the way, won't work either. Only a few direct ones (ISO to and from "
                "CSO or ZSO, and the GameCube/Wii formats) work without it. There is no official chdman download for Linux or macOS, so "
                "it has to come from your system's package manager."),
@@ -8340,6 +8342,11 @@ def linux_program():
     return [str(sh)] if sh.is_file() else [sys.executable, str(here)]
 
 
+LINUX_SCRIPT_CONVERT = "Game Format Converter - Convert"
+LINUX_SCRIPT_ADD = "Game Format Converter - Add to list"
+LINUX_OLD_SCRIPTS = ("CHD Manager - Convert", "CHD Manager - Add to list")          # what versions before 2.1 called them: removed so the menu has no doubles
+
+
 def linux_menu_files(prog=None, data=None):
     """{path: (text, executable)} of every file the Linux right-click menu consists of (all inside the user's own ~/.local/share)."""
     import shlex
@@ -8353,12 +8360,12 @@ def linux_menu_files(prog=None, data=None):
     mimes = ";".join(LINUX_SYS_MIMES + (LINUX_MIME,)) + ";"
     files = {}
     files[data / "applications" / "chd-manager.desktop"] = (
-        "[Desktop Entry]\nType=Application\nName=CHD Manager\nComment=Convert game disc images between formats\n"
+        "[Desktop Entry]\nType=Application\nName=Game Format Converter\nComment=Convert game images and files between formats\n"
         f"Exec={ex} %F\nTerminal=false\nCategories=Utility;\nMimeType={mimes}\n", False)
-    acts = [("convert", "Convert with CHD Manager", "--start"), ("add", "Add to the CHD Manager list", "")]
+    acts = [("convert", "Convert with Game Format Converter", "--start"), ("add", "Add to the Game Format Converter list", "")]
     acts += [(f"to_{k}", "Convert to " + TARGET_LABELS[k].replace("→ ", "").strip(), f"--start --to {k}") for k in LINUX_TO]
     text = ("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n"
-            f"MimeType={mimes}inode/directory;\nX-KDE-Submenu=CHD Manager\nActions={';'.join(a[0] for a in acts)};\n")
+            f"MimeType={mimes}inode/directory;\nX-KDE-Submenu=Game Format Converter\nActions={';'.join(a[0] for a in acts)};\n")
     for key, name, args in acts:
         text += f"\n[Desktop Action {key}]\nName={name}\nExec={ex} {args + ' ' if args else ''}%F\n"
     files[data / "kio" / "servicemenus" / "chd-manager.desktop"] = (text, True)
@@ -8366,7 +8373,7 @@ def linux_menu_files(prog=None, data=None):
         '<?xml version="1.0" encoding="UTF-8"?>\n<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">\n'
         f'  <mime-type type="{LINUX_MIME}">\n    <comment>Game disc image</comment>\n'
         + "".join(f'    <glob pattern="*{e}"/>\n' for e in LINUX_NEW_EXTS) + "  </mime-type>\n</mime-info>\n", False)
-    for name, args in (("CHD Manager - Convert", "--start"), ("CHD Manager - Add to list", "")):
+    for name, args in ((LINUX_SCRIPT_CONVERT, "--start"), (LINUX_SCRIPT_ADD, "")):
         files[data / "nautilus" / "scripts" / name] = (f'#!/bin/sh\nexec {sh} {args + " " if args else ""}"$@"\n', True)
     return files
 
@@ -8387,6 +8394,11 @@ def _linux_refresh(data):
 
 def linux_menu_install(data=None, prog=None):
     data = Path(data) if data else linux_data_home()
+    for old in LINUX_OLD_SCRIPTS:
+        try:
+            (data / "nautilus" / "scripts" / old).unlink()
+        except OSError:
+            pass
     for path, (text, executable) in linux_menu_files(prog, data).items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, "utf-8", newline="\n")
@@ -8396,7 +8408,7 @@ def linux_menu_install(data=None, prog=None):
 
 def linux_menu_remove(data=None):
     data = Path(data) if data else linux_data_home()
-    for path in linux_menu_files(["x"], data):
+    for path in list(linux_menu_files(["x"], data)) + [data / "nautilus" / "scripts" / old for old in LINUX_OLD_SCRIPTS]:
         try:
             path.unlink()
         except OSError:
@@ -8415,8 +8427,8 @@ CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a 
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
 CTX_DIR = r"Software\Classes\Directory"
-CTX_TEXT = {False: ("Convert with CHD Manager", "Add to CHD Manager", "Convert with CHD Manager to"),
-            True: ("Convert this folder with CHD Manager", "Add this folder to CHD Manager", "Convert this folder with CHD Manager to")}
+CTX_TEXT = {False: ("Convert with Game Format Converter", "Add to Game Format Converter", "Convert with Game Format Converter to"),
+            True: ("Convert this folder with Game Format Converter", "Add this folder to Game Format Converter", "Convert this folder with Game Format Converter to")}
 
 
 def ctx_program():
@@ -8445,8 +8457,25 @@ def ctx_menu_installed(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
         return False
 
 
+def ctx_menu_outdated(reg=None, base=CTX_BASE, dirbase=CTX_DIR, data=None):
+    """True when a right-click menu that was added earlier still carries the names of an older version (before 2.1 it said 'CHD Manager'),
+    so the program can quietly rewrite it. A menu that isn't installed is never touched."""
+    try:
+        if reg is None and os.name != "nt":
+            if not linux_menu_installed(data):
+                return False
+            d = Path(data) if data else linux_data_home()
+            return "Name=" + APP_NAME not in (d / "applications" / "chd-manager.desktop").read_text("utf-8")
+        if reg is None:
+            import winreg as reg
+        with reg.OpenKey(reg.HKEY_CURRENT_USER, rf"{ctx_roots(base, dirbase)[0][0]}\shell\CHDManager.Convert") as k:
+            return reg.QueryValueEx(k, "")[0] != CTX_TEXT[False][0]
+    except (OSError, ValueError):
+        return False
+
+
 def ctx_menu_install(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
-    """Add 'Convert with CHD Manager', 'Convert with CHD Manager to' (a submenu of formats) and 'Add to CHD Manager' to the
+    """Add 'Convert with Game Format Converter', 'Convert with Game Format Converter to' (a submenu of formats) and 'Add to Game Format Converter' to the
     right-click menu of disc image files and folders (this user only)."""
     if reg is None and os.name != "nt":
         return linux_menu_install()
@@ -8624,7 +8653,7 @@ def plain_exc(e):
     if isinstance(e, OSError):
         return sentence(f"the file couldn't be opened ({e.strerror or e})")
     if isinstance(e, UnpackError):
-        return sentence(f"CHD Manager can't use this file: {e}")
+        return sentence(f"Game Format Converter can't use this file: {e}")
     if isinstance(e, ValueError):
         return sentence(e)
     return sentence(f"an unexpected problem stopped it ({type(e).__name__}: {e})")
@@ -8729,6 +8758,7 @@ class App:
         if self.v["auto_app_check"].get() and not silent:
             self.root.after(2500, lambda: self.check_app_update_async(manual=False))
         if not silent:
+            self.root.after(900, self.refresh_old_menu)
             self.root.after(1200, self.wii_warning)
             if os.name != "nt" and not CHDMAN and not self.v["linux_help_off"].get():
                 self.root.after(1800, lambda: self.show_linux_setup(auto=True))
@@ -8784,7 +8814,7 @@ class App:
         self.more_menu.add_separator()
         self.more_menu.add_command(label="Copy a report for support", command=self.copy_report)
         self.more_menu.add_command(label="Show the log file", command=self.open_log_folder)
-        self.more_menu.add_command(label="About CHD Manager…", command=lambda: self.open_settings("About"))
+        self.more_menu.add_command(label="About Game Format Converter…", command=lambda: self.open_settings("About"))
 
         # ---- bottom, packed first so it always keeps its space: footer, then action bar, then the settings line
         foot = ttk.Frame(root, padding=(18, 0, 18, 10))
@@ -8801,7 +8831,7 @@ class App:
         _Tip(self.chdman_btn, lambda: "Click to install the chdman update" if self.update_available()
              else "Click to check for a newer chdman")
         _Tip(self.app_btn, lambda: "Click to install the update" if self.app_update_available()
-             else "Click to check for a newer CHD Manager")
+             else "Click to check for a newer Game Format Converter")
 
         act = ttk.Frame(root, padding=(18, 8, 18, 8))
         act.pack(fill="x", side="bottom")
@@ -8906,7 +8936,7 @@ class App:
         # ---- settings live in their own window, not on the main screen
         sw = tk.Toplevel(root)
         sw.withdraw()
-        sw.title("CHD Manager settings")
+        sw.title("Game Format Converter settings")
         sw.transient(root)
         sw.minsize(700, 520)
         sw.protocol("WM_DELETE_WINDOW", sw.withdraw)
@@ -9101,14 +9131,14 @@ class App:
                         variable=v["ps3_split"]).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(g4, text="Keep the PS3_UPDATE folder when making an ISO (a system update on real discs; no emulator uses it)",
                         variable=v["ps3_update"]).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), CHD Manager uses your own RPCS3 and contains no keys.\n"
+        ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), Game Format Converter uses your own RPCS3 and contains no keys.\n"
                            "Show it where rpcs3.exe is (your RPCS3 and its games are never changed):").grid(row=2, column=0, sticky="w", pady=(10, 0))
         pr = ttk.Frame(g4)
         pr.grid(row=3, column=0, sticky="w", pady=(4, 0))
         ttk.Entry(pr, textvariable=v["rpcs3"], width=44).grid(row=0, column=0)
         ttk.Button(pr, text="Browse…", command=self.pick_rpcs3).grid(row=0, column=1, padx=4)
         ttk.Label(g4, text="No RPCS3? Then give your own package key instead (32 letters and numbers, or a file that holds it).\n"
-                           "CHD Manager contains no keys and never downloads them. RPCS3 is used first when both are set.").grid(
+                           "Game Format Converter contains no keys and never downloads them. RPCS3 is used first when both are set.").grid(
             row=4, column=0, sticky="w", pady=(10, 0))
         kf = ttk.Frame(g4)
         kf.grid(row=5, column=0, sticky="w", pady=(4, 0))
@@ -9123,7 +9153,7 @@ class App:
         g5 = ttk.LabelFrame(f, text=" Nintendo Switch (NSP ↔ XCI) ", padding=10)
         g5.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(g5, text="Some Switch games are locked with a ticket, and turning them into an XCI needs your own keys (your prod.keys).\n"
-                           "CHD Manager contains no keys and never downloads them. Choose your prod.keys file, or open it in a text editor,\n"
+                           "Game Format Converter contains no keys and never downloads them. Choose your prod.keys file, or open it in a text editor,\n"
                            "copy everything and paste it here. Only the few keys this uses are kept; nothing else is stored.").grid(row=0, column=0, sticky="w")
         self.sw_keys_box = tk.Text(g5, width=60, height=3, wrap="none")
         self.sw_keys_box.grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -9150,7 +9180,7 @@ class App:
 
         # --- About
         f = tab("About")
-        ttk.Label(f, text=f"CHD Manager {APP_VER}", font=("Segoe UI Semibold", 14)).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(f, text=f"Game Format Converter {APP_VER}", font=("Segoe UI Semibold", 14)).grid(row=0, column=0, columnspan=4, sticky="w")
         lf = ttk.Frame(f)
         lf.grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
         for i, (text, url) in enumerate((("GitHub page and downloads", f"https://github.com/{APP_REPO}"),
@@ -9164,11 +9194,11 @@ class App:
                        "listed in THIRD_PARTY_NOTICES.txt. Not affiliated with MAME. No games or BIOS files are included; "
                        "use it only with discs you own.").grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 6))
         ttk.Separator(f).grid(row=3, column=0, columnspan=4, sticky="ew", pady=4)
-        self.app_upd_btn = ttk.Button(f, text="Check for CHD Manager update", command=lambda: self.check_app_update_async(True))
+        self.app_upd_btn = ttk.Button(f, text="Check for Game Format Converter update", command=lambda: self.check_app_update_async(True))
         self.app_upd_btn.grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.app_upd_label = ttk.Label(f, text=f"You have {APP_VER}.", style="Muted.TLabel")
         self.app_upd_label.grid(row=4, column=1, columnspan=3, sticky="w", padx=(10, 0), pady=(6, 0))
-        ttk.Checkbutton(f, text="Check for CHD Manager updates at startup (never installs by itself)",
+        ttk.Checkbutton(f, text="Check for Game Format Converter updates at startup (never installs by itself)",
                         variable=v["auto_app_check"]).grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
         bf = ttk.Frame(f)
         bf.grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -9304,8 +9334,8 @@ class App:
                                   extent=42, style="pieslice", fill=lerp_hex("#f4f6ff", base, 0.45), outline="")
                      for k in range(4)]
         c.create_oval(cx - 7, cy - 7, cx + 7, cy + 7, fill=base, outline="#ffffff", width=2)
-        c.create_text(76, 23, text="CHD Manager", anchor="w", fill="#ffffff", font=("Segoe UI Semibold", 17))
-        c.create_text(78, 47, text="Convert game disc images between formats  ·  CD / DVD detected for you", anchor="w",
+        c.create_text(76, 23, text="Game Format Converter", anchor="w", fill="#ffffff", font=("Segoe UI Semibold", 17))
+        c.create_text(78, 47, text="Convert game images and files between formats  ·  CD / DVD detected for you", anchor="w",
                       fill="#eef0ff", font=("Segoe UI", 9))
         label, col = {"idle": ("●  Ready", "#ffffff"), "run": ("●  Working…", "#fff1b8"),
                       "done": ("✔  Finished", "#c9ffe4"), "fail": ("●  Finished with errors", "#ffd4d4")}[self.hdr_state]
@@ -9479,7 +9509,7 @@ class App:
             has_zstd = False
         have = {"chdman": bool(CHDMAN), "tkdnd": self.dnd_ok, "zstandard": has_zstd}
         ttk.Label(fr, justify="left", wraplength=520, text=(
-            "CHD Manager uses a few things from your system. Here is what each one is for, whether it was found, and the command "
+            "Game Format Converter uses a few things from your system. Here is what each one is for, whether it was found, and the command "
             "that installs it. The program never installs anything by itself: you copy the command and run it in a terminal, and "
             "your system asks for your password.")).grid(row=0, column=0, columnspan=2, sticky="w")
         r = 1
@@ -9564,7 +9594,7 @@ class App:
     def footer_base(self, which):
         if which == "chdman":
             return f"chdman {self.chd_version}" if CHDMAN else "chdman not found"
-        return f"CHD Manager {APP_VER}"
+        return f"Game Format Converter {APP_VER}"
 
     def set_footer(self, which, note="", tone="muted", revert_after=0):
         """Each footer button shows its component and version; a short note (checking, up to date, update available)
@@ -9579,8 +9609,8 @@ class App:
 
     def app_footer_clicked(self):
         if self.running:
-            self.status.config(text="Wait for the current jobs to finish before updating CHD Manager.")
-            self.busy_notice("updating CHD Manager")
+            self.status.config(text="Wait for the current jobs to finish before updating Game Format Converter.")
+            self.busy_notice("updating Game Format Converter")
             return
         if self.app_update_available():
             self.confirm_app_update()
@@ -10108,7 +10138,7 @@ class App:
                                                  "nothing to convert: Xenia plays it as it is (if it has a matching .data folder, keep that next to it)"), "warn",
                                 f"Skipped (Xbox 360 package, {pk}): {p.name}")
                 else:
-                    self.refuse(p.name, sentence(f"CHD Manager doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
+                    self.refuse(p.name, sentence(f"Game Format Converter doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
                                 f"Skipped (unsupported type): {p.name}")
         refs = sheet_refs(f for f, _r in found)          # a disc file that a sheet in this batch already covers is part of that sheet
         mine = [(f, r) for f, r in found if f.suffix.lower() in (".cue", ".gdi", ".toc") or str(f).lower() not in refs]
@@ -10317,7 +10347,7 @@ class App:
         starts = [i for i, l in enumerate(lines) if "====" in l and "started" in l]
         head = lines[starts[-1]:starts[-1] + 1] if starts else []
         body = [l for l in lines[-400:] if l not in head]
-        return scrub_private("\n".join(["CHD Manager report"] + head + ["--- latest lines of the log ---"] + body))
+        return scrub_private("\n".join(["Game Format Converter report"] + head + ["--- latest lines of the log ---"] + body))
 
     def copy_report(self):
         self.root.clipboard_clear()
@@ -10365,7 +10395,7 @@ class App:
                 o[k] = d
         return o
 
-    BASE_PBP_TEXT = ("A PBP needs a small loader program from Sony to run on a real PSP or Vita. CHD Manager doesn't include it, "
+    BASE_PBP_TEXT = ("A PBP needs a small loader program from Sony to run on a real PSP or Vita. Game Format Converter doesn't include it, "
                      "but can download a generic PBP that has one from the public GitHub repository julianxhokaxhiu/iPoPS "
                      "(two files, about 1.4 MB, each checked against a fixed checksum) and keep it next to CHD Manager.exe as BASE.PBP and DATA.PSP. "
                      "It is only used to copy the loader, icon and boot logo into the PBPs you make. "
@@ -10497,7 +10527,7 @@ class App:
                 with zipfile.ZipFile(arc) as z:
                     infos = z.infolist()
                     if any(i.flag_bits & 1 for i in infos):
-                        raise RuntimeError("it is password-protected, which CHD Manager can't open. Unpack it yourself first")
+                        raise RuntimeError("it is password-protected, which Game Format Converter can't open. Unpack it yourself first")
                     room(sum(i.file_size for i in infos))
                     z.extractall(tmp)
             elif ext in (".tar", ".tgz") or name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
@@ -10516,7 +10546,7 @@ class App:
                 if r.returncode:
                     said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
                     if re.search(r"break signaled|password|encrypted", said, re.I):       # 7-Zip stops like this when it wants a password and gets none
-                        raise RuntimeError("it is password-protected, which CHD Manager can't open. Unpack it yourself first")
+                        raise RuntimeError("it is password-protected, which Game Format Converter can't open. Unpack it yourself first")
                     raise RuntimeError(said[-300:] or f"7-Zip exited with {r.returncode}")
         if ext in (".7z", ".rar") and not find_7z() and not self.silent and not self.ensure_7zip():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -10552,9 +10582,9 @@ class App:
         self.arc_dirs.clear()
 
     def download_gamedb_ui(self):
-        if self.silent or not messagebox.askyesno(APP_NAME, "To name files after the game's title, region or disc code, CHD Manager "
+        if self.silent or not messagebox.askyesno(APP_NAME, "To name files after the game's title, region or disc code, Game Format Converter "
                 "needs a list of PlayStation game codes and titles: gameInfo.db (about 1 MB) from the public PSXPackager project on "
-                "GitHub (MIT license). It is checked against a fixed checksum and kept next to CHD Manager.\n\nDownload it now?"):
+                "GitHub (MIT license). It is checked against a fixed checksum and kept next to Game Format Converter.\n\nDownload it now?"):
             return
         self.status.config(text="Downloading the game list…")
         self.root.update_idletasks()
@@ -10639,15 +10669,15 @@ class App:
         self.ctx_btn.config(text="Remove the right-click menu" if on else "Add the right-click menu")
         if os.name != "nt":
             self.ctx_label.config(text=(
-                "On. In KDE's Dolphin (the Steam Deck's desktop mode) right-click a disc image or folder and open the 'CHD Manager' menu. "
-                "In GNOME Files (Nautilus) look under Scripts. Most file managers also list CHD Manager under 'Open With'. "
+                "On. In KDE's Dolphin (the Steam Deck's desktop mode) right-click a disc image or folder and open the 'Game Format Converter' menu. "
+                "In GNOME Files (Nautilus) look under Scripts. Most file managers also list Game Format Converter under 'Open With'. "
                 "Select several files and they all go into one window." if on else
                 "Off. Turn it on to convert disc images from your file manager's right-click menu (Dolphin, GNOME Files). It only "
                 "adds files inside your own ~/.local/share folder, and this button takes them out again."))
             return
         self.ctx_label.config(text=(
-            "On. Right-click a disc image or a folder and choose 'Convert with CHD Manager' to convert it at once, 'Convert with "
-            "CHD Manager to' to pick the format, or 'Add to CHD Manager' to put it in the list. Select several files and they all go "
+            "On. Right-click a disc image or a folder and choose 'Convert with Game Format Converter' to convert it at once, 'Convert with "
+            "Game Format Converter to' to pick the format, or 'Add to Game Format Converter' to put it in the list. Select several files and they all go "
             "into one window." if on else
             "Off. Turn it on to right-click a disc image or a folder and convert it from the menu. It only changes your own Windows "
             "account (no administrator needed), and this button takes it out again."))
@@ -10658,7 +10688,7 @@ class App:
                 ctx_menu_remove()
             else:
                 where = "your own Windows account only" if os.name == "nt" else "files inside your own ~/.local/share folder only"
-                if not messagebox.askyesno(APP_NAME, "Add 'Convert with CHD Manager' to the right-click menu of disc image files?\n\n"
+                if not messagebox.askyesno(APP_NAME, "Add 'Convert with Game Format Converter' to the right-click menu of disc image files?\n\n"
                                            f"This writes to {where}, and nothing about what opens "
                                            "when you double-click changes. If you move this program's folder, remove the menu "
                                            "and add it again.", parent=self.settings_win):
@@ -10686,6 +10716,15 @@ class App:
                 pass
             finally:
                 c.close()
+
+    def refresh_old_menu(self):
+        """A right-click menu added by an earlier version still says 'CHD Manager': rewrite it once so it shows the current name."""
+        try:
+            if ctx_menu_outdated():
+                ctx_menu_install()
+                self.log(f"The right-click menu now says {APP_NAME}.", "info")
+        except Exception:  # noqa: BLE001 - never let a menu problem get in the way of starting
+            pass
 
     def poll_ipc(self):
         try:
@@ -12247,7 +12286,7 @@ class App:
         stop = lambda: self.stop_flag  # noqa: E731
         try:
             if len(job.nsps) > 1 and any(t["kind"] == "" for i in job.nsps for t in i["titles"]):
-                raise UnpackError("to put several files together, CHD Manager has to tell the game, its updates and its extra content apart, and that needs your own keys "
+                raise UnpackError("to put several files together, Game Format Converter has to tell the game, its updates and its extra content apart, and that needs your own keys "
                                   "(Settings, Formats, Nintendo Switch)")
             for i, t in sw_select(job.nsps)[1]:
                 self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one is in the list.", "info")
@@ -12786,18 +12825,18 @@ class App:
         w, fr = self.themed_dialog("Wii setup")
         self.wii_win = w
         ttk.Label(fr, justify="left", wraplength=470, font=("Segoe UI Semibold", 10),
-                  text="To turn a Wii disc into RVZ, WIA or WBFS, CHD Manager needs ONE of these two things:").grid(
+                  text="To turn a Wii disc into RVZ, WIA or WBFS, Game Format Converter needs ONE of these two things:").grid(
             row=0, column=0, sticky="w")
         o1 = ttk.LabelFrame(fr, text=" Option 1: Dolphin (the easy way) ", padding=10)
         o1.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(o1, justify="left", wraplength=450, text="If Dolphin is on this PC, just show CHD Manager where it is. "
+        ttk.Label(o1, justify="left", wraplength=450, text="If Dolphin is on this PC, just show Game Format Converter where it is. "
                   "That is all it needs; no key is required.").grid(row=0, column=0, columnspan=2, sticky="w")
         d_stat = ttk.Label(o1, text="", wraplength=300, justify="left")
         d_stat.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(8, 0))
         o2 = ttk.LabelFrame(fr, text=" Option 2: your own Wii key ", padding=10)
         o2.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(o2, justify="left", wraplength=450, text="Choose the file that holds your key, or paste the key "
-                  "(32 letters and numbers). CHD Manager contains no keys and never downloads them.").grid(row=0, column=0, columnspan=3, sticky="w")
+                  "(32 letters and numbers). Game Format Converter contains no keys and never downloads them.").grid(row=0, column=0, columnspan=3, sticky="w")
         k_stat = ttk.Label(o2, text="", wraplength=300, justify="left")
         k_stat.grid(row=1, column=1, columnspan=2, sticky="w", padx=(10, 0), pady=(8, 0))
         pasted = tk.StringVar()
@@ -13591,7 +13630,7 @@ class App:
             self.update_action_labels()
         self.start(chds)
 
-    # ------------------------------------------------------------------ CHD Manager's own updates
+    # ------------------------------------------------------------------ Game Format Converter's own updates
     def check_app_update_async(self, manual=False):
         def work():
             try:
@@ -13600,7 +13639,7 @@ class App:
                 self.post("app_upd_info", None, str(e), manual)
         threading.Thread(target=work, daemon=True).start()
         if manual:
-            self.status.config(text="Checking GitHub for a newer CHD Manager…")
+            self.status.config(text="Checking GitHub for a newer Game Format Converter…")
             self.set_footer("app", "checking…")
 
     def app_update_available(self):
@@ -13610,7 +13649,7 @@ class App:
         """Handy for bug reports. Deliberately leaves out folder paths and user names."""
         ram = total_ram_gb()
         return "\n".join([
-            f"CHD Manager {APP_VER} ({'exe' if FROZEN else 'script'})",
+            f"Game Format Converter {APP_VER} ({'exe' if FROZEN else 'script'})",
             f"chdman {self.chd_version or 'not found'}" + ("" if self.has_dvd else " (no createdvd)"),
             f"Windows: {platform.platform()}",
             f"Python {sys.version.split()[0]}, Tk {tk.TkVersion}",
@@ -13630,7 +13669,7 @@ class App:
             return getattr(self, "silent_choice", None) or ("now" if getattr(self, "silent_answer", True) else "later")
         result = {"v": "later"}
         win = tk.Toplevel(self.root)
-        win.title("CHD Manager update")
+        win.title("Game Format Converter update")
         win.configure(bg=self.t["bg"])
         win.transient(self.root)
         win.resizable(False, False)
@@ -13657,8 +13696,8 @@ class App:
     def on_app_update_info(self, info, err, manual):
         if err or not info:
             if manual:
-                self.status.config(text="Could not check for a CHD Manager update.")
-                self.notify("Could not check for a CHD Manager update.\n\nThe reason: " + (err or "no answer from GitHub") +
+                self.status.config(text="Could not check for a Game Format Converter update.")
+                self.notify("Could not check for a Game Format Converter update.\n\nThe reason: " + (err or "no answer from GitHub") +
                             "\n\nCheck your internet connection and try again later.", error=True)
                 self.set_footer("app", "couldn't check", revert_after=8000)
             return
@@ -13669,13 +13708,13 @@ class App:
             self.app_upd_label.config(text=f"Up to date ({APP_VER}).", style="Muted.TLabel")
             self.set_footer("app", "up to date" if manual else "", revert_after=8000 if manual else 0)
             if manual:
-                self.status.config(text=f"CHD Manager {APP_VER} is the latest version.")
-                self.log(f"CHD Manager {APP_VER} is up to date.", "ok")
+                self.status.config(text=f"Game Format Converter {APP_VER} is the latest version.")
+                self.log(f"Game Format Converter {APP_VER} is up to date.", "ok")
             return
         self.app_upd_label.config(text=f"{new_v} available (you have {APP_VER}).", style="Warn.TLabel")
         self.set_footer("app", f"{new_v} available - click to update", "warn")
         self.draw_header()                      # shows the clickable "update available" badge
-        self.log(f"A newer CHD Manager is available: {new_v} (you have {APP_VER}). Click the badge at the top right, "
+        self.log(f"A newer Game Format Converter is available: {new_v} (you have {APP_VER}). Click the badge at the top right, "
                  "or use Settings, About page.", "warn")
         # startup: ask unless this exact version was skipped; the button and the badge always ask
         if manual or self.v["skip_version"].get() != info["tag"]:
@@ -13690,13 +13729,13 @@ class App:
             return
         mode = "exe" if FROZEN else "page"
         if FROZEN:
-            msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
+            msg = (f"Game Format Converter {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
                    f"Update now? It downloads {info['name']} ({fmt_size(info['size'])}) from github.com/{APP_REPO}, "
                    "checks its SHA-256, test-runs it, and restarts into the new version. "
                    "Your settings and chdman stay as they are.")
         elif can_self_update_source() and info.get("kind") == "source" and info.get("url") and os.access(HERE, os.W_OK):
             mode = "source"
-            msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
+            msg = (f"Game Format Converter {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
                    f"Update now? It downloads {info['name']} ({fmt_size(info['size'])}) from github.com/{APP_REPO}, "
                    "checks its SHA-256, test-runs the new version, then replaces the program files in this folder and restarts. "
                    f"The old files are kept in a '{SOURCE_BACKUP}' folder. Your settings, keys and chdman are not touched.")
@@ -13704,7 +13743,7 @@ class App:
             why = ("This release has no download for this kind of install." if can_self_update_source() and not info.get("url")
                    else "This copy's folder can't be written to." if can_self_update_source() and not os.access(HERE, os.W_OK)
                    else "You're running the script version, so it can't replace itself.")
-            msg = (f"CHD Manager {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
+            msg = (f"Game Format Converter {new_v} is available (you have {APP_VER}).\n\n{notes}\n\n"
                    f"{why} 'Update now' opens the download page.")
         choice = self.ask_update_choice(msg)
         if choice == "skip":
@@ -13785,15 +13824,15 @@ class App:
             self.app_upd_btn.config(state="normal")
             self.app_btn.config(state="normal")
             messagebox.showinfo(APP_NAME, f"The update was installed, but the program couldn't restart itself ({e}).\n\n"
-                                          "Close CHD Manager and start it again to use the new version.")
+                                          "Close Game Format Converter and start it again to use the new version.")
 
     def on_app_update_done(self, ok, msg):
         self.app_upd_btn.config(state="normal")
         self.app_btn.config(state="normal")
         self.set_footer("app")
         self.cur_bar["value"] = 0
-        self.status.config(text="CHD Manager update failed - nothing was changed.")
-        self.log("CHD Manager update failed: " + msg, "err")
+        self.status.config(text="Game Format Converter update failed - nothing was changed.")
+        self.log("Game Format Converter update failed: " + msg, "err")
         if not self.silent:
             messagebox.showerror(APP_NAME, "The update failed:\n" + msg + "\n\nYour current version was not changed.")
 
@@ -13873,7 +13912,7 @@ class App:
         if not self.ask("Updating chdman needs 7-Zip, a free file tool that isn't installed on this PC.\n\n"
                         "Install it now? It comes from the official Windows Package Manager (winget), is about 2 MB, "
                         "and Windows will ask for your permission first."):
-            self.notify("No problem. Without 7-Zip, CHD Manager can't update chdman automatically, so the update "
+            self.notify("No problem. Without 7-Zip, Game Format Converter can't update chdman automatically, so the update "
                         "button won't work. Everything else in the program works normally.\n\n"
                         "To update by hand, download chdman from github.com/mamedev/mame/releases and pick it with "
                         "Browse in Settings, Output page. You can also install 7-Zip later from 7-zip.org.")
@@ -13890,7 +13929,7 @@ class App:
                         "Until then the update button won't work, but everything else does.", error=True)
         else:
             self.notify("7-Zip wasn't installed (the permission prompt may have been declined).\n\n"
-                        "Without it CHD Manager can't update chdman automatically. Everything else works normally.\n"
+                        "Without it Game Format Converter can't update chdman automatically. Everything else works normally.\n"
                         "You can install 7-Zip from 7-zip.org and try again.\n\nDetails: " + msg, error=True)
         return False
 
@@ -14094,10 +14133,10 @@ def smoke_test(outfile):
 
 CLI_EPILOG = """\
 examples:
-  CHD Manager cli game.cue --to chd -o D:\\chd
-  CHD Manager cli game.chd --to pbp --level 9 -o D:\\psp
-  CHD Manager cli D:\\roms --to chd --exists overwrite --log convert.txt
-  CHD Manager cli game.chd game2.iso --list
+  Game Format Converter cli game.cue --to chd -o D:\\chd
+  Game Format Converter cli game.chd --to pbp --level 9 -o D:\\psp
+  Game Format Converter cli D:\\roms --to chd --exists overwrite --log convert.txt
+  Game Format Converter cli game.chd game2.iso --list
 
 targets (--list shows which ones a given file can become):
 """ + "\n".join(f"  {k:<11}{v}" for k, v in TARGET_LABELS.items()) + """
@@ -14132,7 +14171,7 @@ def cli_main(argv):
     """chdm cli ...: the same conversions as the window, without the window."""
     import argparse
     attach_console()
-    ap = argparse.ArgumentParser(prog="CHD Manager cli", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=CLI_EPILOG,
+    ap = argparse.ArgumentParser(prog="Game Format Converter cli", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=CLI_EPILOG,
                                  description=f"{APP_NAME} {APP_VER}: convert disc images from the command line. "
                                              "Takes files, folders and archives; what each one becomes is chosen with --to.")
     ap.add_argument("inputs", nargs="*", help="files, folders or archives")

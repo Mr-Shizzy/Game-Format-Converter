@@ -1,5 +1,5 @@
 #!/bin/sh
-# CHD Manager for Linux, Steam Deck (desktop mode) and macOS: runs the program from source.
+# Game Format Converter for Linux, Steam Deck (desktop mode) and macOS: runs the program from source.
 #   ./chd-manager.sh                 opens the window
 #   ./chd-manager.sh cli --help      the command line version
 # If something it needs is missing, this script says what, why, and offers to install it (it asks first, and shows the
@@ -42,7 +42,7 @@ missing() {
     esac
 }
 
-# offer KEY "what it is" "why CHD Manager needs it"
+# offer KEY "what it is" "why Game Format Converter needs it"
 # Returns 0 when it was installed, 1 when not.
 offer() {
     echo
@@ -68,7 +68,7 @@ offer() {
         return 1
     fi
     if [ ! -t 0 ] && [ -z "$CHDM_ASSUME_TTY" ]; then
-        echo "Run that command yourself in a terminal, then start CHD Manager again."
+        echo "Run that command yourself in a terminal, then start Game Format Converter again."
         return 1
     fi
     printf "Run it now? Your system may ask for your password. [y/N] "
@@ -80,20 +80,20 @@ offer() {
 }
 
 if missing py; then
-    offer py "Python 3" "CHD Manager is written in Python, so it can't run at all without it." || exit 1
+    offer py "Python 3" "Game Format Converter is written in Python, so it can't run at all without it." || exit 1
     missing py && exit 1
 fi
 
 if missing tk; then
     offer tk "Python's window toolkit (tkinter)" \
-        "CHD Manager draws its window with tkinter, so without it nothing can be shown on screen." || exit 1
-    missing tk && { echo "tkinter still isn't available, so CHD Manager can't open."; exit 1; }
+        "Game Format Converter draws its window with tkinter, so without it nothing can be shown on screen." || exit 1
+    missing tk && { echo "tkinter still isn't available, so Game Format Converter can't open."; exit 1; }
 fi
 
 if missing chdman; then
     offer chdman "chdman" \
-        "chdman (part of MAME's tools) is the program that actually makes and reads CHD files; CHD Manager is the friendly front end that asks it to do the work. Without it nothing can be turned into a CHD or back, and most other conversions, which pass through a CHD, won't work either. There is no official chdman download for Linux or macOS, so it has to come from your package manager." \
-        || echo "CHD Manager will still open, but it can't make or read CHD files until chdman is installed."
+        "chdman (part of MAME's tools) is the program that actually makes and reads CHD files; Game Format Converter is the friendly front end that asks it to do the work. Without it nothing can be turned into a CHD or back, and most other conversions, which pass through a CHD, won't work either. There is no official chdman download for Linux or macOS, so it has to come from your package manager." \
+        || echo "Game Format Converter will still open, but it can't make or read CHD files until chdman is installed."
 fi
 
 if [ -n "$CHDM_DRY_RUN" ]; then

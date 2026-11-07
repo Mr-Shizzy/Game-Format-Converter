@@ -1,6 +1,6 @@
 THIRD-PARTY NOTICES
 
-CHD Manager is free software under the GNU General Public
+Game Format Converter is free software under the GNU General Public
 License, version 3 or (at your option) any later version (see LICENSE). That choice
 follows from the GameCube/Wii code below, which is a Python port of GPL-licensed code.
 The release build of CHD Manager.exe and the chdman.exe and gameInfo.db that ship
@@ -1208,12 +1208,12 @@ code from libMirage, mdf2iso, nrg2iso, ccd2iso, cdirip or similar GPL tools was 
 
 
 ==============================================================================
-6. iPoPS BASE.PBP and DATA.PSP  (optional download, NOT included in CHD Manager)
+6. iPoPS BASE.PBP and DATA.PSP  (optional download, NOT included in Game Format Converter)
 ==============================================================================
-To make PBP files that run on a real PSP, CHD Manager can - only if the user agrees -
+To make PBP files that run on a real PSP, Game Format Converter can - only if the user agrees -
 download two small files, BASE.PBP and DATA.PSP, from the public repository
 https://github.com/julianxhokaxhiu/iPoPS (MIT license, pinned to one commit and
-checked against fixed SHA-256 checksums). They are not part of CHD Manager, are not in
+checked against fixed SHA-256 checksums). They are not part of Game Format Converter, are not in
 its repository or release, and are used only to copy the PS1 loader, icon and boot
 logo into the PBP files the user makes. Their contents may be subject to the rights of
 their original authors; the user is responsible for choosing to download them.
@@ -1229,7 +1229,7 @@ emulator (https://github.com/dolphin-emu/dolphin), re-written here in Python. Do
 source files carry "SPDX-License-Identifier: GPL-2.0-or-later"; Copyright (c) the Dolphin
 Emulator Project and its contributors. This is the reason this program is GPL.
 
-CHD Manager contains no Wii common key and never downloads one. Turning a Wii disc
+Game Format Converter contains no Wii common key and never downloads one. Turning a Wii disc
 into RVZ, WIA or WBFS needs either the user's own key (a keys folder next to the program,
 or pasted in Settings) or the user's own copy of Dolphin's DolphinTool.exe, which this
 program only runs; it does not include or copy it. Dolphin is not affiliated with this
@@ -1303,7 +1303,7 @@ similar tools was used.
 ==============================================================================
 Version 2.1.0 added the formats below. Each reader and writer was written for this
 project from the format's public description and from reading the open-source
-projects listed. No source code of these projects is included in CHD Manager, and
+projects listed. No source code of these projects is included in Game Format Converter, and
 no file from them is distributed with it. They are listed because their authors'
 work made the formats understandable.
 
@@ -1317,7 +1317,7 @@ work made the formats understandable.
   nup specification (a55uka)         the NUP package format (its page lists MIT)
   Azahar (GPL-3.0)                   Nintendo 3DS compressed files (.zcci, .zcxi,
                                      .z3dsx): the layout was read from its source;
-                                     CHD Manager has its own reader and writer
+                                     Game Format Converter has its own reader and writer
   3dsconv (ihaveamac, MIT)           Nintendo 3DS CIA layout, used to cross-check
                                      the CIA files this program writes. One small
                                      standard block of data (the 172-byte content

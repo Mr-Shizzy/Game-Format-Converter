@@ -1,4 +1,6 @@
-# CHD Manager
+# Game Format Converter
+
+**Formerly CHD Manager.** It was renamed in 2.1.0 because it now converts far more than CHDs. Nothing else changed for you: your settings and keys carry over, and the in-program updater keeps working. The program's file is still called `CHD Manager.exe` and the download is still named `CHD-Manager-<version>-win64.zip`, so that updates from older versions find it.
 
 A friendly app that converts game disc images and game files from one format to another, and the front end for MAME's `chdman`. Add your files, pick what each one should become, and press Start. It works out what each file is, only offers conversions that can work, checks there is room on the drive before it starts, and verifies what it wrote.
 
@@ -6,12 +8,12 @@ It covers **CHD, PBP, CDI, VCD, CSO/ZSO, ECM, ISO, CUE/BIN, GDI** (PlayStation, 
 
 It is portable: one folder, nothing installed. CHD conversions are done by `chdman` from the [MAME](https://github.com/mamedev/mame) project; every other format is handled by the program's own code.
 
-![CHD Manager, dark theme](docs/screenshot-dark.png)
+![Game Format Converter, dark theme](docs/screenshot-dark.png)
 
 <details>
 <summary>Light theme and settings</summary>
 
-![CHD Manager, light theme](docs/screenshot-light.png)
+![Game Format Converter, light theme](docs/screenshot-light.png)
 
 ![The Formats page of the settings window](docs/screenshot-formats.png)
 
@@ -23,6 +25,7 @@ It is portable: one folder, nothing installed. CHD conversions are done by `chdm
 
 ## What's new in 2.1.0
 
+- **A new name:** CHD Manager is now Game Format Converter.
 - **Xbox 360:** ZAR (for Xenia), ISO and game folders, in every direction that makes sense. Xbox 360 download packages (the hex-named single files, such as Xbox Live Arcade and Games on Demand) are not discs, so they are refused with a plain explanation.
 - **Original Xbox:** a full 7.8 GB dump becomes a trimmed `.xiso.iso` that holds just the game; also game folders and CHD.
 - **PlayStation 3:** game folder to ISO and back, multiMAN split pieces joined, and `.pkg` packages unpacked and packed (with RPCS3 or with your own key; see [Keys](#keys-and-what-the-program-does-not-contain)).
@@ -81,14 +84,14 @@ Also: **rebuild a CD's error correction**, **extract the artwork from a PBP**, a
 ### Windows
 
 1. Get `CHD-Manager-<version>-win64.zip` from the [Releases](../../releases) page and unzip it anywhere.
-2. Run **CHD Manager.exe**.
+2. Run **CHD Manager.exe** (the program's file keeps its old name; see the top of this page).
 3. Click **Add Files** or **Add Folder** (or drag them in), check the Action column, and press **Start**.
 
 Windows 10/11, 64-bit. Python is not needed. Settings are saved in `chd_manager_settings.json` next to the exe.
 
 **About warnings:** the exe is not code-signed, so Windows SmartScreen may say "unknown publisher" (choose *More info, then Run anyway*) and some antivirus programs are suspicious of this kind of packaged Python program. If you would rather not run a binary, [run it from source](#run-from-source) or [build it yourself](#build-the-exe).
 
-**Right-click menu (optional):** *Settings, Output, Add the right-click menu* adds "Convert with CHD Manager", "Convert with CHD Manager to" and "Add to CHD Manager" for your user only, and *Remove the right-click menu* takes them out again. On Windows 11 they appear under *Show more options*.
+**Right-click menu (optional):** *Settings, Output, Add the right-click menu* adds "Convert with Game Format Converter", "Convert with Game Format Converter to" and "Add to Game Format Converter" for your user only, and *Remove the right-click menu* takes them out again. On Windows 11 they appear under *Show more options*.
 
 ### Linux (experimental)
 
@@ -136,8 +139,8 @@ If a PS2 game on a CD slightly exceeds the size limit, or anything else is detec
 
 The program is offline except for the update checks, each with its own on/off switch (chdman on the *Output* page of the settings window, the program on its *About* page):
 
-- At startup it asks GitHub for the latest MAME release number and the latest CHD Manager release. It never downloads anything by itself.
-- When you confirm a CHD Manager update it downloads the release from this repo, verifies its SHA-256, test-runs the new version, and only then replaces itself (keeping a copy of the old one to roll back to). When you confirm a chdman update it downloads the official release from `github.com/mamedev/mame`.
+- At startup it asks GitHub for the latest MAME release number and the latest Game Format Converter release. It never downloads anything by itself.
+- When you confirm a Game Format Converter update it downloads the release from this repo, verifies its SHA-256, test-runs the new version, and only then replaces itself (keeping a copy of the old one to roll back to). When you confirm a chdman update it downloads the official release from `github.com/mamedev/mame`.
 - Two optional downloads, each only on request and checked against a fixed checksum: the base PBP files for a real PSP (from [iPoPS](https://github.com/julianxhokaxhiu/iPoPS)) and a refreshed game list.
 
 ## Run from source
@@ -198,7 +201,7 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 - **PS3:** packed packages were installed by RPCS3, but I did not launch a game from one; multiMAN pieces larger than 4 GB were only tried with made-up pieces.
 - **Xbox:** only Crazy Taxi 3 was tried in xemu; a rebuilt Xbox 360 ISO has no security data and is for emulators only. Xbox 360 ISO to ZAR works, but Xenia main does not read ZAR.
 - **Linux:** only Ubuntu 24.04 under WSL2. Not a Steam Deck, not macOS, not a real Dolphin or Nautilus right-click menu, and not the Linux self-update against a real release.
-- **Windows right-click menu:** the entries are registered and launch the program (checked through Windows' own verb mechanism), but I could not click the cascading "Convert with CHD Manager to" submenu.
+- **Windows right-click menu:** the entries are registered and launch the program (checked through Windows' own verb mechanism), but I could not click the cascading "Convert with Game Format Converter to" submenu.
 - Any file made by other programs for some formats (CISO, GCZ, WIA with purge compression, split WBFS, ECM from other tools), multi-track `.nrg`, multi-session images, PBPs on a PSP Go, Vita or PS Classic, and playing any game all the way through.
 
 ## Credits and license
@@ -211,4 +214,4 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 - Built with help from Claude (Anthropic); designed and tested by Mr-Shizzy.
 - Unofficial: this project is not affiliated with Sony, Microsoft, Nintendo, Sega or any emulator named above. It includes no games, BIOS files, firmware, keys or other copyrighted game content. Use it only with games you own.
 
-CHD Manager is free software under the [GNU General Public License, version 3 or (at your option) any later version](LICENSE). The Windows release also bundles chdman, Python, Tcl/Tk and zstandard, whose licenses are in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+Game Format Converter is free software under the [GNU General Public License, version 3 or (at your option) any later version](LICENSE). The Windows release also bundles chdman, Python, Tcl/Tk and zstandard, whose licenses are in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
