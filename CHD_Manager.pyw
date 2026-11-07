@@ -39,7 +39,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "CHD Manager"
-APP_VER = "2.0.1"
+APP_VER = "2.1.0"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 SETTINGS_FILE = HERE / "chd_manager_settings.json"
@@ -8933,9 +8933,43 @@ class App:
     def build_options(self, nb):
         v = self.v
 
-        def tab(title):
-            f = ttk.Frame(nb, padding=10)
-            nb.add(f, text=title)
+        self._scroll_canvases = []
+
+        def tab(title, scroll=False):
+            if not scroll:
+                f = ttk.Frame(nb, padding=10)
+                nb.add(f, text=title)
+                return f
+            # a page taller than the window (the Formats page has a group for every console) scrolls instead of being cut off
+            outer = ttk.Frame(nb)
+            cv = tk.Canvas(outer, highlightthickness=0, bd=0, bg=self.t["bg"], height=300)
+            sb = ttk.Scrollbar(outer, orient="vertical", command=cv.yview)
+            cv.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            cv.pack(side="left", fill="both", expand=True)
+            f = ttk.Frame(cv, padding=10)
+            inner = cv.create_window((0, 0), window=f, anchor="nw")
+            f.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all"), width=f.winfo_reqwidth()))   # the page asks for the width its contents need
+            cv.bind("<Configure>", lambda e: cv.itemconfigure(inner, width=e.width))
+
+            def wheel(e):
+                box = cv.bbox("all")
+                if not box or box[3] <= cv.winfo_height():
+                    return                                  # it all fits: nothing to scroll
+                step = -1 if e.num == 4 else 1 if e.num == 5 else (-1 if e.delta > 0 else 1)
+                cv.yview_scroll(step * 3, "units")
+
+            def enter(_e):
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    cv.bind_all(seq, wheel)
+
+            def leave(_e):
+                for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                    cv.unbind_all(seq)
+            outer.bind("<Enter>", enter)
+            outer.bind("<Leave>", leave)
+            self._scroll_canvases.append(cv)
+            nb.add(outer, text=title)
             return f
 
         def row(f, r, label, widget):
@@ -9007,7 +9041,7 @@ class App:
             self.refresh_ctx()
 
         # --- Formats (what each file becomes is chosen in its Action column; this tab only holds the extras)
-        f = tab("Formats")
+        f = tab("Formats", scroll=True)
         ttk.Label(f, style="Muted.TLabel", wraplength=600, justify="left",
                   text="What each file becomes is chosen in the Action column of the list; only choices that can work for that file are "
                        "offered. The options below are the extras for those formats.").grid(row=0, column=0, sticky="w", pady=(0, 8))
@@ -9228,6 +9262,8 @@ class App:
             if font:
                 self.sugg_text.tag_configure(tag, font=font)
         self.settings_win.configure(bg=t["bg"])
+        for cv in getattr(self, "_scroll_canvases", []):
+            cv.configure(bg=t["bg"])
         self.more_menu.configure(bg=t["panel"], fg=t["fg"], activebackground=t["accent"], activeforeground="#ffffff",
                                  bd=0, relief="flat")
         self.menu.configure(bg=t["panel"], fg=t["fg"], activebackground=t["accent"], activeforeground="#ffffff",
@@ -11583,7 +11619,7 @@ class App:
         part = out.with_name(out.name + ".part")
         stop = lambda: self.stop_flag  # noqa: E731
         self.post("log", f"\n{job.path.name}  [3DS → CIA]", "info")
-        self.post("log", "This CIA is not signed and has no certificates: it is for emulators and for custom-firmware consoles.", "warn")
+        self.post("log", "Unsigned CIA with no certificate chain. Tested with Azahar only. Installation and launch on 3DS consoles running custom firmware have not been verified.", "warn")
         try:
             cci_to_cia(job.path, part, self.cso_progress(job, "Building CIA"), stop)
             if o["verify_after"] or o["delete_src"]:

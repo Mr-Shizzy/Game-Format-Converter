@@ -18,3 +18,7 @@ game_image_toolbox_settings.json
 game_image_toolbox_log.txt
 chd_manager_log.txt
 gameInfo.db
+
+# the program's own log (it lists the names of converted files) and old build folders
+chd_manager*.log
+dist_*/

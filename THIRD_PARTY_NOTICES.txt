@@ -1295,3 +1295,38 @@ format description), PBP, CDI, MDS, NRG and CloneCD readers and writers, and the
 cards drawn for PBP files were written for this project. LZ4 (https://lz4.org) is by
 Yann Collet. No code from libMirage, mdf2iso, nrg2iso, ccd2iso, cdirip, ciso or
 similar tools was used.
+
+
+
+==============================================================================
+11. Other formats, written from public descriptions and open-source references
+==============================================================================
+Version 2.1.0 added the formats below. Each reader and writer was written for this
+project from the format's public description and from reading the open-source
+projects listed. No source code of these projects is included in CHD Manager, and
+no file from them is distributed with it. They are listed because their authors'
+work made the formats understandable.
+
+  ZArchive (Exzap, MIT-0)            Xbox 360 .zar archives
+  extract-xiso                       Xbox disc image layout (test reference only)
+  RPCS3 (GPL-2.0)                    PlayStation 3 .pkg layout (read from its source;
+                                     the program runs the user's own rpcs3.exe when asked)
+  makeps3iso (Estwald, GPL-3.0+)     PlayStation 3 ISO layout (test reference only)
+  NSC Builder (julesontheroad, MIT)  Nintendo Switch NSP/XCI conversion method
+  NSP-Box (smarkyie, MIT)            Nintendo Switch 2 NUP, and Switch packaging
+  nup specification (a55uka)         the NUP package format (its page lists MIT)
+  Azahar (GPL-3.0)                   Nintendo 3DS compressed files (.zcci, .zcxi,
+                                     .z3dsx): the layout was read from its source;
+                                     CHD Manager has its own reader and writer
+  3dsconv (ihaveamac, MIT)           Nintendo 3DS CIA layout, used to cross-check
+                                     the CIA files this program writes. One small
+                                     standard block of data (the 172-byte content
+                                     index inside a CIA ticket) is the same as in
+                                     that project's template; it is format data
+                                     that every CIA ticket has.
+  maxcso (ISC)                       PSP CSO version 2
+  3dbrew (wiki)                      Nintendo 3DS file formats
+
+Nothing from Nintendo, Sony, Microsoft or Sega is included: no keys, no certificates,
+no firmware, no BIOS files and no game data. The CIA files this program writes have
+an empty certificate area and unsigned (zeroed) signatures, on purpose.

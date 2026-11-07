@@ -1,6 +1,7 @@
 <#
   Builds the portable release:  dist\CHD Manager\  (CHD Manager.exe + chdman.exe + gameInfo.db + licenses)
-  and a zip of it:              dist\CHD-Manager-<version>-win64.zip
+  a zip of it:                  dist\CHD-Manager-<version>-win64.zip
+  and the source zip:           dist\CHD-Manager-<version>-source.zip   (CHD_Manager.pyw + chd-manager.sh + licenses + README)
 
   Needs:  Python 3 with tkinter (tested with 3.12; the python.org install has it) and
           7-Zip (only to unpack MAME's download).  Nothing else is installed except the pip
@@ -103,6 +104,27 @@ Copy-Item "$root\LICENSE", "$root\THIRD_PARTY_NOTICES.txt", "$root\README.md", "
 $zip = "$root\dist\CHD-Manager-$ver-win64.zip"
 Compress-Archive -Path $out -DestinationPath $zip -Force
 
+# ---- 6. source zip (Linux/macOS, and anyone who would rather not run the exe). Python's zipfile is used because
+#         Compress-Archive can't mark chd-manager.sh as executable. The in-app updater on those systems reads this zip.
+$srcZip = "$root\dist\CHD-Manager-$ver-source.zip"
+$srcPy = @'
+import sys, zipfile, os
+root, dest = sys.argv[1], sys.argv[2]
+files = ["CHD_Manager.pyw", "chd-manager.sh", "LICENSE", "THIRD_PARTY_NOTICES.txt", "README.md"]
+with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+    for name in files:
+        data = open(os.path.join(root, name), "rb").read()
+        if name.endswith(".sh"):
+            data = data.replace(b"\r\n", b"\n")
+        zi = zipfile.ZipInfo("CHD-Manager/" + name, date_time=(2026, 1, 1, 0, 0, 0))
+        zi.compress_type = zipfile.ZIP_DEFLATED
+        zi.external_attr = ((0o755 if name.endswith(".sh") else 0o644) | 0o100000) << 16
+        z.writestr(zi, data)
+'@
+$srcPy | & python - $root $srcZip
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $srcZip)) { Fail "Could not make the source zip." }
+
 Write-Host "`nDone." -ForegroundColor Green
 Write-Host "  Folder: $out"
 Write-Host "  Zip:    $zip  (SHA-256 $((Get-FileHash $zip -Algorithm SHA256).Hash))"
+Write-Host "  Source: $srcZip  (SHA-256 $((Get-FileHash $srcZip -Algorithm SHA256).Hash))"
