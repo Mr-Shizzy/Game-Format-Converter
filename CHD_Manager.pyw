@@ -546,7 +546,7 @@ def delete_forever(paths):
 
 
 # ------------------------------------------------- Game Format Converter's own updates (GitHub releases)
-APP_REPO = "Mr-Shizzy/CHD-Manager"
+APP_REPO = "Mr-Shizzy/Game-Format-Converter"
 APP_RELEASE_API = f"https://api.github.com/repos/{APP_REPO}/releases/latest"
 APP_URL_PREFIX = f"https://github.com/{APP_REPO}/"
 APP_OWNER_PREFIX = "https://github.com/Mr-Shizzy/"        # a renamed repo keeps this owner: its downloads are still trusted (and still need the checksum)
@@ -582,7 +582,7 @@ def app_asset_kind():
 def parse_app_release(data, kind):
     """A GitHub 'latest release' answer -> dict(tag, name, url, size, sha, page, notes, kind). Only trusts github.com/<repo>/.
     win64: the first 64-hex text in the notes is the zip's SHA-256 (the convention every released updater already reads).
-    source: the SHA-256 is on the line of the notes that names the source zip ('<hash>  CHD-Manager-x-source.zip').
+    source: the SHA-256 is on the line of the notes that names the source zip ('<hash>  Game-Format-Converter-x-source.zip').
     A release without a source zip still parses (url is empty): the update can be announced, just not installed by itself."""
     pat = r"(?:CHD-Manager|Game-Format-Converter)-.+-win64\.zip" if kind == "win64" else r"(?:CHD-Manager|Game-Format-Converter)-.+-source\.zip"
     asset = next((a for a in data.get("assets", []) if re.fullmatch(pat, a["name"])), None)
@@ -617,7 +617,7 @@ def fetch_app_release():
 
 def stage_app_update(info, dest_dir, progress=None):
     """Download the release zip, verify its SHA-256, and save the new exe next to the current one as
-    'CHD Manager.new.exe'. Returns that path. Refuses anything without a matching checksum."""
+    'Game Format Converter.new.exe'. Returns that path. Refuses anything without a matching checksum."""
     import zipfile
     if not info["url"].startswith(APP_OWNER_PREFIX):
         raise RuntimeError("Unexpected download address.")
@@ -641,14 +641,14 @@ def stage_app_update(info, dest_dir, progress=None):
             raise RuntimeError("Checksum mismatch - the download was discarded.")
         with zipfile.ZipFile(zpath) as z:
             names = {Path(n).name: n for n in z.namelist() if not n.endswith("/")}
-            exe_name = next((n for n in ("CHD Manager.exe", "Game Format Converter.exe") if n in names), None)     # the file is still called by its old name; a later release may use the new one
+            exe_name = next((n for n in ("Game Format Converter.exe", "CHD Manager.exe") if n in names), None)     # (the old name is still accepted)
             if not exe_name:
-                raise RuntimeError("The zip does not contain CHD Manager.exe.")
+                raise RuntimeError("The zip does not contain Game Format Converter.exe.")
             exe_bytes = z.read(names[exe_name])
             extras = {n: z.read(names[n]) for n in ("LICENSE", "THIRD_PARTY_NOTICES.txt") if n in names}
         if exe_bytes[:2] != b"MZ":
             raise RuntimeError(f"{exe_name} in the zip is not a Windows program.")
-        new = dest_dir / "CHD Manager.new.exe"
+        new = dest_dir / "Game Format Converter.new.exe"
         new.write_bytes(exe_bytes)
         for n, b in extras.items():
             (dest_dir / n).write_bytes(b)
@@ -10397,7 +10397,7 @@ class App:
 
     BASE_PBP_TEXT = ("A PBP needs a small loader program from Sony to run on a real PSP or Vita. Game Format Converter doesn't include it, "
                      "but can download a generic PBP that has one from the public GitHub repository julianxhokaxhiu/iPoPS "
-                     "(two files, about 1.4 MB, each checked against a fixed checksum) and keep it next to CHD Manager.exe as BASE.PBP and DATA.PSP. "
+                     "(two files, about 1.4 MB, each checked against a fixed checksum) and keep it next to Game Format Converter.exe as BASE.PBP and DATA.PSP. "
                      "It is only used to copy the loader, icon and boot logo into the PBPs you make. "
                      "You can also choose any working PlayStation 1 .pbp of your own in Settings, Formats.")
 

@@ -1,6 +1,6 @@
 # Game Format Converter
 
-**Formerly CHD Manager.** It was renamed in 2.1.0 because it now converts far more than CHDs. Nothing else changed for you: your settings and keys carry over, and the in-program updater keeps working. The program's file is still called `CHD Manager.exe` and the download is still named `CHD-Manager-<version>-win64.zip`, so that updates from older versions find it.
+**Formerly CHD Manager.** It was renamed in 2.1.0 because it now converts far more than CHDs. If you have an older CHD Manager, see [Coming from CHD Manager?](#coming-from-chd-manager).
 
 A friendly app that converts game disc images and game files from one format to another, and the front end for MAME's `chdman`. Add your files, pick what each one should become, and press Start. It works out what each file is, only offers conversions that can work, checks there is room on the drive before it starts, and verifies what it wrote.
 
@@ -83,8 +83,8 @@ Also: **rebuild a CD's error correction**, **extract the artwork from a PBP**, a
 
 ### Windows
 
-1. Get `CHD-Manager-<version>-win64.zip` from the [Releases](../../releases) page and unzip it anywhere.
-2. Run **CHD Manager.exe** (the program's file keeps its old name; see the top of this page).
+1. Get `Game-Format-Converter-<version>-win64.zip` from the [Releases](../../releases) page and unzip it anywhere.
+2. Run **Game Format Converter.exe**.
 3. Click **Add Files** or **Add Folder** (or drag them in), check the Action column, and press **Start**.
 
 Windows 10/11, 64-bit. Python is not needed. Settings are saved in `chd_manager_settings.json` next to the exe.
@@ -95,9 +95,13 @@ Windows 10/11, 64-bit. Python is not needed. Settings are saved in `chd_manager_
 
 ### Linux (experimental)
 
-Download `CHD-Manager-<version>-source.zip`, unzip it, and run `./chd-manager.sh`. It needs `python3` with tkinter and a `chdman` (for example the `mame-tools` package); if something is missing the launcher says what, why, and the exact command, and asks before running anything. Optional: `tkdnd` for drag and drop, `python3-zstandard` for RVZ, ZSO, ZAR, NUP and the 3DS compressed formats. The Windows-only parts are replaced or switched off (your desktop's trash instead of the Recycle Bin, no chdman updater). Settings, the log and the right-click menu (a KDE Dolphin service menu, GNOME Files scripts and an "Open with" entry, all inside your own `~/.local/share`) work on Linux; see *More, What to install (and why)* in the app.
+Download `Game-Format-Converter-<version>-source.zip`, unzip it, and run `./chd-manager.sh`. It needs `python3` with tkinter and a `chdman` (for example the `mame-tools` package); if something is missing the launcher says what, why, and the exact command, and asks before running anything. Optional: `tkdnd` for drag and drop, `python3-zstandard` for RVZ, ZSO, ZAR, NUP and the 3DS compressed formats. The Windows-only parts are replaced or switched off (your desktop's trash instead of the Recycle Bin, no chdman updater). Settings, the log and the right-click menu (a KDE Dolphin service menu, GNOME Files scripts and an "Open with" entry, all inside your own `~/.local/share`) work on Linux; see *More, What to install (and why)* in the app.
 
 I could only test Linux on Ubuntu 24.04 under WSL2. It has **not** been tried on a Steam Deck, on macOS, or in a real Dolphin or Nautilus window. Treat it as experimental and please report what you find.
+
+## Coming from CHD Manager?
+
+This is the same program under a new name and a new repository address. An older CHD Manager (2.0.x) can't find this release by itself, so download it once from the [Releases](../../releases) page and unzip it anywhere; you can then delete the old folder. Your settings don't carry over: for the optional features that need them (Wii, PlayStation 3 and Switch keys, the base PBP, the artwork folder and so on), put them in again under *Settings*.
 
 ## Keys, and what the program does not contain
 
@@ -159,7 +163,7 @@ Needs Python 3 (tested with 3.12) and 7-Zip.
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-This installs PyInstaller and zstandard, downloads the latest official chdman and the game list (checking the SHA-256 of both), builds `CHD Manager.exe`, and writes the portable folder, the Windows zip and the source zip to `dist/`. Use `-ChdmanPath` to supply your own chdman.
+This installs PyInstaller and zstandard, downloads the latest official chdman and the game list (checking the SHA-256 of both), builds `Game Format Converter.exe`, and writes the portable folder, the Windows zip and the source zip to `dist/`. Use `-ChdmanPath` to supply your own chdman.
 
 ## Testing
 

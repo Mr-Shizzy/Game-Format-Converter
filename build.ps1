@@ -1,7 +1,7 @@
 <#
-  Builds the portable release:  dist\Game Format Converter\  (CHD Manager.exe + chdman.exe + gameInfo.db + licenses)
-  a zip of it:                  dist\CHD-Manager-<version>-win64.zip
-  and the source zip:           dist\CHD-Manager-<version>-source.zip   (CHD_Manager.pyw + chd-manager.sh + licenses + README)
+  Builds the portable release:  dist\Game Format Converter\  (Game Format Converter.exe + chdman.exe + gameInfo.db + licenses)
+  a zip of it:                  dist\Game-Format-Converter-<version>-win64.zip
+  and the source zip:           dist\Game-Format-Converter-<version>-source.zip   (CHD_Manager.pyw + chd-manager.sh + licenses + README)
 
   Needs:  Python 3 with tkinter (tested with 3.12; the python.org install has it) and
           7-Zip (only to unpack MAME's download).  Nothing else is installed except the pip
@@ -41,7 +41,7 @@ if ($ChdmanPath) {
     Write-Host "Using chdman from $ChdmanPath"
 } else {
     Write-Host "Looking up the latest MAME release on GitHub..."
-    $rel = Invoke-RestMethod "https://api.github.com/repos/mamedev/mame/releases/latest" -Headers @{ 'User-Agent' = 'CHD-Manager-build' }
+    $rel = Invoke-RestMethod "https://api.github.com/repos/mamedev/mame/releases/latest" -Headers @{ 'User-Agent' = 'Game-Format-Converter-build' }
     $asset = $rel.assets | Where-Object { $_.name -match '^mame\d+b_(x64|64bit)\.exe$' } | Select-Object -First 1
     $sumsAsset = $rel.assets | Where-Object { $_.name -eq 'SHA256SUMS' } | Select-Object -First 1
     if (-not $asset -or -not $sumsAsset) { Fail "Could not find the Windows download or SHA256SUMS in release $($rel.tag_name). MAME may have renamed it; download chdman by hand and use -ChdmanPath." }
@@ -87,26 +87,26 @@ if (-not ((Test-Path $gameDb) -and ((Get-FileHash $gameDb -Algorithm SHA256).Has
 
 # ---- 4. exe
 Write-Host "Building the exe..."
-& python -m PyInstaller --noconfirm --clean --onefile --windowed --name "CHD Manager" `
+& python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Game Format Converter" `
     --icon "$root\assets\icon.ico" --add-data "${chdman};." --hidden-import zstandard --hidden-import zstandard.backend_c `
     --distpath "$root\build\exe" --workpath "$root\build\work" --specpath "$root\build" "$root\CHD_Manager.pyw"
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$root\build\exe\CHD Manager.exe")) { Fail "PyInstaller failed." }
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$root\build\exe\Game Format Converter.exe")) { Fail "PyInstaller failed." }
 
 # ---- 5. portable folder + zip
 $ver = (Select-String -Path "$root\CHD_Manager.pyw" -Pattern '^APP_VER\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 $out = "$root\dist\Game Format Converter"
 Remove-Item "$root\dist" -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $out | Out-Null
-Copy-Item "$root\build\exe\CHD Manager.exe" $out
+Copy-Item "$root\build\exe\Game Format Converter.exe" $out
 Copy-Item $chdman "$out\chdman.exe"
 Copy-Item $gameDb "$out\gameInfo.db"
 Copy-Item "$root\LICENSE", "$root\THIRD_PARTY_NOTICES.txt", "$root\README.md", "$root\chdm.cmd" $out
-$zip = "$root\dist\CHD-Manager-$ver-win64.zip"
+$zip = "$root\dist\Game-Format-Converter-$ver-win64.zip"
 Compress-Archive -Path $out -DestinationPath $zip -Force
 
 # ---- 6. source zip (Linux/macOS, and anyone who would rather not run the exe). Python's zipfile is used because
 #         Compress-Archive can't mark chd-manager.sh as executable. The in-app updater on those systems reads this zip.
-$srcZip = "$root\dist\CHD-Manager-$ver-source.zip"
+$srcZip = "$root\dist\Game-Format-Converter-$ver-source.zip"
 $srcPy = @'
 import sys, zipfile, os
 root, dest = sys.argv[1], sys.argv[2]

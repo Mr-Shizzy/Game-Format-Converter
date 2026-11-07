@@ -3,7 +3,7 @@ THIRD-PARTY NOTICES
 Game Format Converter is free software under the GNU General Public
 License, version 3 or (at your option) any later version (see LICENSE). That choice
 follows from the GameCube/Wii code below, which is a Python port of GPL-licensed code.
-The release build of CHD Manager.exe and the chdman.exe and gameInfo.db that ship
+The release build of Game Format Converter.exe and the chdman.exe and gameInfo.db that ship
 with it contain or consist of third-party software. Their licenses are reproduced below,
 as those licenses require.
 
@@ -402,9 +402,9 @@ freely, subject to the following restrictions:
 
 
 ==============================================================================
-2. Python  (bundled in CHD Manager.exe)
+2. Python  (bundled in Game Format Converter.exe)
 ==============================================================================
-The release CHD Manager.exe embeds the Python runtime. Python is licensed under the
+The release Game Format Converter.exe embeds the Python runtime. Python is licensed under the
 Python Software Foundation License; the license text follows.
 
 A. HISTORY OF THE SOFTWARE
@@ -1112,7 +1112,7 @@ docs/license.html_lib.
 
 
 ==============================================================================
-3. Tcl/Tk  (bundled in CHD Manager.exe, provides the window toolkit)
+3. Tcl/Tk  (bundled in Game Format Converter.exe, provides the window toolkit)
 ==============================================================================
 This software is copyrighted by the Regents of the University of
 California, Sun Microsystems, Inc., Scriptics Corporation, ActiveState
@@ -1159,7 +1159,7 @@ terms specified in this license.
 ==============================================================================
 4. PyInstaller  (used to build the exe)
 ==============================================================================
-CHD Manager.exe is packaged with PyInstaller (https://pyinstaller.org). PyInstaller's
+Game Format Converter.exe is packaged with PyInstaller (https://pyinstaller.org). PyInstaller's
 bootloader is GPL-2.0-or-later with a special exception that permits distributing
 the bundled program under any license.
 
@@ -1250,7 +1250,7 @@ error correction (EDC and ECC) uses the standard CD-ROM definitions (ECMA-130).
 
 
 ==============================================================================
-9. zstandard  (Python package, bundled in CHD Manager.exe; used for RVZ and ZSTD)
+9. zstandard  (Python package, bundled in Game Format Converter.exe; used for RVZ and ZSTD)
 ==============================================================================
 The zstandard package (https://github.com/indygreg/python-zstandard) and the Zstandard
 library inside it (https://github.com/facebook/zstd, Copyright (c) Meta Platforms, Inc.
