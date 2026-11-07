@@ -5473,8 +5473,8 @@ def cci_to_cia(src, dest, prog, stopped):
     tmd_size = 0xB04 + 0x30 * n
     tik_off = 0x2040 + 0xA00
     tmd_off = _align(tik_off + 0x350)
-    meta_off = _align(tmd_off + tmd_size)
-    content_off = _align(meta_off + 0x3AC0)
+    content_off = _align(tmd_off + tmd_size)                    # the game parts follow the TMD; the meta block comes after them
+    meta_off = _align(content_off + sum(sizes))
     mask = bytearray(0x2000)
     for i, _o, _s in parts:
         mask[i // 8] |= 0x80 >> (i % 8)
@@ -5494,8 +5494,6 @@ def cci_to_cia(src, dest, prog, stopped):
         b.write(tik)
         b.write(bytes(tmd_off - b.tell()))
         b.write(bytes(tmd_size))                                 # the TMD, filled in once the content hashes are known
-        b.write(bytes(meta_off - b.tell()))
-        b.write(meta)
         b.write(bytes(content_off - b.tell()))
         done = 0
         for k, (idx, off, size) in enumerate(parts):
@@ -5539,6 +5537,9 @@ def cci_to_cia(src, dest, prog, stopped):
         tmd[0xB04:] = chunks
         b.seek(tmd_off)
         b.write(tmd)
+        b.seek(0, 2)
+        b.write(bytes(meta_off - b.tell()))
+        b.write(meta)
 
 
 def cia_matches(cia, cci, prog, stopped):
@@ -5549,7 +5550,7 @@ def cia_matches(cia, cci, prog, stopped):
         _hs, _t, _v, csz, tsz, msz, metasz, total = struct.unpack_from("<IHHIIIIQ", hd, 0)
         tik_off = _align(0x2020) + _align(csz)
         tmd_off = _align(tik_off + tsz)
-        content_off = _align(_align(tmd_off + msz) + metasz)
+        content_off = _align(tmd_off + msz)
         f.seek(tmd_off)
         tmd = f.read(msz)
         n = struct.unpack_from(">H", tmd, 0x1DE)[0]
@@ -5606,7 +5607,7 @@ def cia_parts(path):
         if hs != 0x2020 or ctype != 0 or not (0 < tsz <= 0x2000 and 0 < msz <= 0x100000 and csz <= 0x10000 and metasz <= 0x10000):
             raise ValueError("this doesn't look like a CIA file (its header isn't what a CIA has), or it is damaged")
         tmd_off = _align(_align(hs) + _align(csz) + _align(tsz))
-        content_off = _align(_align(tmd_off + msz) + metasz)
+        content_off = _align(tmd_off + msz)
         if content_off + total > size:
             raise ValueError("this CIA is damaged or cut short (it is smaller than its header says)")
         f.seek(tmd_off)
