@@ -4454,6 +4454,7 @@ class Job:
             keys = ["xci", "nsp"] if len(self.nsps) > 1 else ["xci"] if self.container == "swnsp" else ["nsp"]
             if len(titles) > 1 and all(t["kind"] for t in titles):
                 keys.append("split")
+            keys.append("nup")
             return [(k, target_label(k)) for k in keys]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
@@ -7340,10 +7341,10 @@ def build_nsp(files, dest, prog=None, stopped=lambda: False):
             f.close()
 
 
-# ---- Switch 2: NUP, a community container for decrypted game folders (experimental)
+# ---- Switch and Switch 2: NUP, a community container for decrypted game folders (experimental)
 # Written from the public draft "NUP - NX Package Format" 1.0-draft by a55uka (github.com/a55uka/nup). It holds a game's decrypted exefs and romfs
 # folders (and optionally an update and extra content), each file stored raw or as one zstd frame, with a SHA-256 of every file and of the table.
-# It uses no keys and does no decrypting. Nothing here has been tried in an emulator by the author.
+# The NUP code itself uses no keys and does no decrypting (the NSP / XCI -> NUP step further down does, with the user's own keys).
 NUP_KINDS = {0: "game", 1: "update", 2: "extra content"}
 NUP_RAW_OVER = 256 * 1024 * 1024                  # files bigger than this are not compressed (the NSP-Box tool does the same by default)
 
@@ -7816,6 +7817,176 @@ def nup_extract(path, dest, prog=None, stopped=lambda: False):
     finally:
         close()
     return pk
+
+
+# ---- Switch NSP / XCI -> NUP: the game's exefs and romfs taken out of its NCA files with the user's own keys (the same keys as NSP <-> XCI)
+# A game's program NCA holds the exefs (section 0, a PFS0) and the romfs (section 1, an IVFC tree); extra content (DLC) is a data NCA with a romfs.
+# An update is a patch against the game's romfs (a BKTR section), which would have to be merged into the game first; that isn't done here.
+def sw_sec_reader(f, off, h, idx, key):
+    """read(rel, n) for one NCA section: the bytes at `rel` inside it, opened with the content key (AES-CTR) or as they are (a section that isn't encrypted)."""
+    fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    if fs[4] == 3:
+        return lambda rel, n: sw_section_read(f, off, h, idx, key, rel, n)
+    if fs[4] == 1:
+        start = struct.unpack("<I", h[0x240 + 0x10 * idx:0x244 + 0x10 * idx])[0] * 0x200
+
+        def plain(rel, n):
+            f.seek(off + start + rel)
+            return f.read(n)
+        return plain
+    raise UnpackError("part of this game is stored as a patch (or in a form this program can't open yet), so it can't go into a NUP")
+
+
+def sw_safe_name(raw):
+    """One file or folder name from a romfs or exefs table, checked so that nothing can be written outside the folder it is unpacked into."""
+    nm = raw.decode("utf-8", "replace")
+    if nm in ("", ".", "..") or any(c in nm for c in '/\\:\0'):
+        raise UnpackError("this game holds a file name that isn't safe to unpack, so nothing was written")
+    return nm
+
+
+def sw_pfs0_tree(rd, base):
+    """The files of a PFS0 at `base` inside a section -> [(path parts, offset inside the section, size)]."""
+    head = rd(base, 16)
+    if len(head) < 16 or head[:4] != b"PFS0":
+        raise UnpackError("the game's exefs can't be read (it doesn't start like one); the keys may not match this game")
+    n, strsz = struct.unpack("<II", head[4:12])
+    if not 0 < n < 4096 or strsz > 1 << 20:
+        raise UnpackError("the game's exefs has a damaged file list")
+    ents, strs = rd(base + 16, 24 * n), rd(base + 16 + 24 * n, strsz)
+    if len(ents) < 24 * n or len(strs) < strsz:
+        raise UnpackError("the game's exefs is cut short")
+    data0 = base + 16 + 24 * n + strsz
+    out = []
+    for i in range(n):
+        o, sz, so, _r = struct.unpack("<QQII", ents[24 * i:24 * i + 24])
+        out.append(((sw_safe_name(strs[so:].split(b"\0", 1)[0]),), data0 + o, sz))
+    return out
+
+
+def sw_romfs_tree(rd, base):
+    """The files of a romfs (its tables start at `base` inside the section) -> [(path parts, offset inside the section, size)]."""
+    hd = rd(base, 0x50)
+    if len(hd) < 0x50:
+        raise UnpackError("the game's romfs is cut short")
+    v = struct.unpack("<10Q", hd)
+    dmo, dms, fmo, fms, dat = v[3], v[4], v[7], v[8], v[9]
+    if v[0] != 0x50 or dms > 1 << 28 or fms > 1 << 28 or not dms:
+        raise UnpackError("the game's romfs can't be read (its header isn't right); the keys may not match this game")
+    dirs, fls = rd(base + dmo, dms), rd(base + fmo, fms)
+    if len(dirs) < dms or len(fls) < fms:
+        raise UnpackError("the game's romfs is cut short")
+    out, stack, seen, none = [], [(0, ())], set(), 0xFFFFFFFF
+    while stack:
+        d, path = stack.pop()
+        if d in seen or d + 24 > len(dirs):
+            raise UnpackError("the game's romfs has a damaged folder table")
+        seen.add(d)
+        _p, _sib, child, fil, _h, _nl = struct.unpack("<6I", dirs[d:d + 24])
+        while fil != none:
+            if fil + 32 > len(fls) or len(out) > 1 << 22:
+                raise UnpackError("the game's romfs has a damaged file table")
+            _p, sib, o, sz, _h, nl = struct.unpack("<IIQQII", fls[fil:fil + 32])
+            out.append((path + (sw_safe_name(fls[fil + 32:fil + 32 + nl]),), base + dat + o, sz))
+            fil = sib
+        while child != none:
+            if child + 24 > len(dirs):
+                raise UnpackError("the game's romfs has a damaged folder table")
+            _p, sib, _c, _f, _h, nl = struct.unpack("<6I", dirs[child:child + 24])
+            stack.append((child, path + (sw_safe_name(dirs[child + 24:child + 24 + nl]),)))
+            child = sib
+    return out
+
+
+def sw_nca_files(f, off, hd, h, key):
+    """What one NCA holds that goes into a NUP -> [(folder name, path parts, read, offset inside the section, size)]: a program NCA's exefs and romfs,
+    a data NCA's romfs. Anything else (control, legal, offline html, meta) has no place in a NUP."""
+    out = []
+    if hd["ctype"] not in (0, 4):
+        return out
+    for idx in range(4):
+        start, end = struct.unpack("<II", h[0x240 + 0x10 * idx:0x248 + 0x10 * idx])
+        fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+        if end <= start:
+            continue
+        if fs[2] == 1 and idx == 0 and hd["ctype"] == 0:                  # the exefs (section 2 of a program is its logo, left out)
+            rd = sw_sec_reader(f, off, h, idx, key)
+            base = sw_pfs0_start(h, idx)
+            if base is None:
+                raise UnpackError("the game's exefs has a layout this program doesn't know")
+            out += [("exefs", p, rd, o, sz) for p, o, sz in sw_pfs0_tree(rd, base)]
+        elif fs[2] == 0:                                                 # a romfs
+            ivfc = fs[8:0x100]
+            if ivfc[:4] != b"IVFC":
+                raise UnpackError("the game's romfs has a layout this program doesn't know")
+            levels = struct.unpack("<I", ivfc[0xC:0x10])[0]
+            if not 2 <= levels <= 7:
+                raise UnpackError("the game's romfs has a damaged header")
+            base = struct.unpack("<Q", ivfc[0x10 + 0x18 * (levels - 2):0x18 + 0x18 * (levels - 2)])[0]
+            rd = sw_sec_reader(f, off, h, idx, key)
+            out += [("romfs", p, rd, o, sz) for p, o, sz in sw_romfs_tree(rd, base)]
+    return out
+
+
+def sw_nup_titles(infos):
+    """The titles that go into a NUP, and the ones left out -> (chosen [(info, title)], updates [title]). Updates can't be taken in (see above)."""
+    chosen, _left = sw_select(infos)
+    return [(i, t) for i, t in chosen if t["kind"] != "update"], [t for _i, t in chosen if t["kind"] == "update"]
+
+
+def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False):
+    """Switch packages (NSP / XCI) -> a folder in the layout nup_bundle reads: base/ (exefs, romfs) and dlc/<id>/<n>/ (romfs). Uses the user's keys.
+    -> (total bytes written, [titles left out]). Raises SwitchKeyError or UnpackError."""
+    sw_need(keys, "header_key")
+    chosen, updates = sw_nup_titles(infos)
+    if not any(t["kind"] == "base" for _i, t in chosen):
+        raise UnpackError("there is no game in what was added (only an update or extra content), and a NUP needs the game's own files")
+    dest, jobs, handles = Path(dest), [], {}
+    try:
+        for i, t in chosen:
+            f = handles.get(i["path"])
+            if f is None:
+                f = handles[i["path"]] = open(i["path"], "rb")
+            nth = 0
+            for nm, o, _sz in t["ncas"]:
+                hd, h = sw_nca_head(f, o, keys)
+                if hd["ctype"] not in (0, 4):
+                    continue
+                key = sw_content_key(f, o, hd, h, keys, i["tiks"])
+                files = sw_nca_files(f, o, hd, h, key)
+                if not files:
+                    continue
+                if t["kind"] == "base":
+                    root = dest / "base"
+                else:
+                    root = dest / "dlc" / f"{t['tid']:016X}" / str(nth)
+                    nth += 1
+                for folder, parts, rd, rel, size in files:
+                    jobs.append((root.joinpath(folder, *parts), rd, rel, size))
+        total = sum(j[3] for j in jobs)
+        free = shutil.disk_usage(dest.parent).free if dest.parent.exists() else 1 << 62
+        if free < total + (256 << 20):
+            raise UnpackError(f"there isn't room to unpack this game first: it needs about {fmt_size(total)} free next to where the NUP goes, and there is {fmt_size(free)}")
+        done = 0
+        for tgt, rd, rel, size in jobs:
+            tgt.parent.mkdir(parents=True, exist_ok=True)
+            with open(tgt, "wb") as g:
+                left = size
+                while left > 0:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    b = rd(rel + size - left, min(left, 1 << 22))
+                    if not b:
+                        raise UnpackError("the game's data is cut short")
+                    g.write(b)
+                    left -= len(b)
+                    done += len(b)
+                    if prog:
+                        prog(done / max(1, total))
+        return total, updates
+    finally:
+        for f in handles.values():
+            f.close()
 
 
 # ---- writing a disc image
@@ -11460,6 +11631,8 @@ class App:
             return self.do_xci_to_nsp(job, o)
         if t == "split" and job.container in ("swnsp", "swxci"):
             return self.do_sw_split(job, o)
+        if t == "nup" and job.container in ("swnsp", "swxci"):
+            return self.do_sw_to_nup(job, o)
         if t in ("z3ds", "unz3ds") and job.container == "z3ds":
             return self.do_z3ds(job, o)
         if t == "cia" and job.container == "z3ds":
@@ -12309,6 +12482,70 @@ class App:
             return
         finally:
             part.unlink(missing_ok=True)
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_sw_to_nup(self, job, o):
+        """Switch packages (NSP / XCI) -> a NUP: the game's (and its extra content's) files are taken out with the user's own keys, then packed. Experimental."""
+        keys = parse_switch_keys(o.get("switch_keys", ""))
+        if not keys:
+            job.status, job.result = "Failed (setup needed)", ("a NUP holds a game's decrypted files, so this needs your own keys: Settings, Formats, "
+                                                               "Nintendo Switch, and choose your prod.keys file or paste it in")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        infos = job.nsps
+        if not any(t["kind"] in ("base", "") for i in infos for t in i["titles"]):
+            job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP or XCI as well, because a NUP needs the game"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        stem = job.path.stem
+        base = next((t for i in infos for t in i["titles"] if t["kind"] == "base"), None)
+        if base and not re.search(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", stem):
+            stem += f" [{base['tid']:016X}]"
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup").with_name(stem + ".nup"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        work = out.parent / f".{out.name[:40]}.chdm_nup"
+        self.post("log", f"\n{job.path.name}  [Switch package{'s' if len(infos) != 1 else ''} → NUP]  (experimental: the game is unpacked with your keys, then packed "
+                         "as the public draft of the format describes; it needs room for the unpacked game next to the NUP)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Unpacking the game")
+        stop = lambda: self.stop_flag  # noqa: E731
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+            total, updates = sw_to_nup_folder(infos, keys, work, lambda x: prog(x * 0.4), stop)
+            job.zar_raw = total
+            for t in updates:
+                self.post("log", f"The update (version {t['version']}) was left out: a Switch update is a patch against the game's files, and merging one in isn't "
+                                 "supported yet, so the NUP holds the game as it is without it.", "info")
+            pkgs = nup_bundle(work) or []
+            err = nup_resolve(pkgs, work) if pkgs else "nothing in it can go into a NUP"
+            if err:
+                raise UnpackError(err)
+            prog = self.cso_progress(job, "Building NUP")
+            build_nup(pkgs, part, lambda x: prog(x * (0.35 if verify else 0.6)), stop)
+            if verify:
+                self.post("log", "Reading the new NUP back against the unpacked files…", "info")
+                nup_verify(part, pkgs, lambda x: prog(0.35 + x * 0.25), stop)
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+            shutil.rmtree(work, ignore_errors=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.zar_raw)} → {fmt_size(job.out_size)})", "ok")
         if o["delete_src"] and verify:
             self.remove_sources(job, o)
 

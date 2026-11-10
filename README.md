@@ -29,7 +29,7 @@ It is portable: one folder, nothing installed. CHD conversions are done by `chdm
 - **Xbox 360:** ZAR (for Xenia), ISO and game folders, in every direction that makes sense. Xbox 360 download packages (the hex-named single files, such as Xbox Live Arcade and Games on Demand) are not discs, so they are refused with a plain explanation.
 - **Original Xbox:** a full 7.8 GB dump becomes a trimmed `.xiso.iso` that holds just the game; also game folders and CHD.
 - **PlayStation 3:** game folder to ISO and back, multiMAN split pieces joined, and `.pkg` packages unpacked and packed (with RPCS3 or with your own key; see [Keys](#keys-and-what-the-program-does-not-contain)).
-- **Nintendo Switch:** NSP to XCI and back, a bundle of base game + newest update + DLC into one file, one NSP per title, swapping in a newer update, and a firmware safeguard that tells you when your keys are older than the game. **Switch 2:** folder to NUP and back (experimental).
+- **Nintendo Switch:** NSP to XCI and back, a bundle of base game + newest update + DLC into one file, one NSP per title, swapping in a newer update, and a firmware safeguard that tells you when your keys are older than the game. **NUP (Switch and Switch 2, experimental):** a decrypted game folder to NUP and back, and an NSP or XCI to NUP (the game and its DLC, unpacked with your own keys).
 - **Nintendo 3DS:** compress `.3ds`/`.cci`/`.cxi`/`.3dsx` for the Azahar emulator and unpack them again; make a CIA from a decrypted `.3ds`; make a `.3ds` from a decrypted CIA. Nothing is ever decrypted.
 - **PSP:** CSO version 2 (real PSP only), plus an option that leaves out the useless firmware update (the `UPDATE` folder) when compressing.
 - **PlayStation 2 VCD** (POPStarter), **M3U playlists** for multi-disc games, **Linux** support, a **right-click menu** in Windows and Linux file managers, a **log file** and a one-click **support report**, and plain-English windows that say why a file was refused.
@@ -55,7 +55,7 @@ Each file in the list has an **Action** drop-down; it only offers what can work 
 | **PS3: ISO, game folder, split pieces** | Folder to ISO and back; `.iso.0`/`.66600` pieces are joined | yes | yes |
 | **PS3: `.pkg`** | Unpacked to a game folder; a game folder packed into a package | yes | yes |
 | **Switch: NSP, XCI** | Package to cartridge image and back; one NSP per title; bundles with the newest update and DLC | yes | yes |
-| **Switch 2: NUP** | Game folder (base, updates, DLC) to NUP and back. Experimental | yes | yes |
+| **Switch / Switch 2: NUP** | Game folder (base, updates, DLC) to NUP and back; an NSP or XCI to NUP (base game and DLC, needs your `prod.keys`; an update is left out, because it is a patch that would have to be merged into the game first). Experimental | yes | yes |
 | **3DS: `.zcci`, `.zcxi`, `.z3dsx`** | Azahar's compressed 3DS files | yes | yes |
 | **3DS: `.3ds`/`.cci`, `.cia`** | Cartridge dump to CIA, and CIA back to a `.3ds`, for decrypted games | yes | yes |
 | **ZIP, TAR, GZ, 7Z, RAR** | Archives are opened as input (7Z and RAR use 7-Zip) | yes | n/a |
@@ -181,6 +181,7 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 | PS3 ISO to folder | RPCS3 | Plays |
 | Switch NSP with a ticket to XCI; XCI to NSP (a base game with an update and seven DLC); the same game split into nine NSPs and joined into an XCI again | An emulator | Worked: the update and all seven DLC were active in the game that had them |
 | Switch 2 folder to NUP (base + update, a 6.5 GB game) | Eglantine, a Switch 2 emulator build | Loaded and played |
+| Switch NSP with a ticket to NUP (four base games, the largest 7.2 GB with 4,678 files) | None: read back and checked only | Unpacked with prod.keys, every file read back against its checksum; the files look right (a GBA ROM header and the exefs `NSO0` mark) |
 | 3DS: `.zcci` made by this program | Azahar | Boots and runs |
 | 3DS: `.cia` made from a decrypted dump | Azahar | Installs and runs (title screen reached) |
 | 3DS: `.3ds` made from that CIA | Azahar | Boots |
@@ -201,7 +202,7 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 - **Switch:** swapping in a newer update was only checked on made-up files; the individual split NSPs were not loaded in an emulator on their own; "newest update only" follows how the patch files work but is not documented authoritatively. The firmware table is from a public wiki.
 - **VCD** files were only checked by converting back and forth; I could not try one on a PS2 with POPStarter.
 - **Locked buttons** (a click during a conversion can't disturb it) were checked in the program's own code and tests, not by clicking.
-- **Switch 2 NUP** follows a draft specification and has worked in one emulator; other loaders may differ.
+- **NUP** follows a draft specification. A Switch 2 NUP has worked in one emulator; a NUP made from a Switch NSP has not been loaded in any emulator, and a game with an update or DLC was not tried for it. Other loaders may differ.
 - **PS3:** packed packages were installed by RPCS3, but I did not launch a game from one; multiMAN pieces larger than 4 GB were only tried with made-up pieces.
 - **Xbox:** only Crazy Taxi 3 was tried in xemu; a rebuilt Xbox 360 ISO has no security data and is for emulators only. Xbox 360 ISO to ZAR works, but Xenia main does not read ZAR.
 - **Linux:** only Ubuntu 24.04 under WSL2. Not a Steam Deck, not macOS, not a real Dolphin or Nautilus right-click menu, and not the Linux self-update against a real release.
