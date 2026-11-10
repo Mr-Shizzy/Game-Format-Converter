@@ -6942,7 +6942,7 @@ def sw_content_key(f, off, hd, h, keys, tiks):
         if t is None:
             raise SwitchKeyError("a file in this game needs a ticket that isn't in the package")
         rid, enc, rev, _ty = t
-        return aes_ecb(sw_title_kek(keys, rev), True)(enc)
+        return aes_ecb(sw_title_kek(keys, max(rev, hd["gen"])), True)(enc)      # older tickets carry 0 here; the file's own key generation is what the console uses
     return aes_ecb(sw_area_key(keys, hd["gen"], hd["slot"]), True)(h[0x300:0x340])[0x20:0x30]
 
 
@@ -7122,7 +7122,7 @@ def sw_plan(infos, keys, latest_only=True):
                         tk_ = i["tiks"].get(hd["rights"])
                         if tk_ is None:
                             raise SwitchKeyError(f"{nm} needs a ticket that {i['path'].name} doesn't hold")
-                        tk = aes_ecb(sw_title_kek(keys, tk_[2]), True)(tk_[1])
+                        tk = aes_ecb(sw_title_kek(keys, max(tk_[2], hd["gen"])), True)(tk_[1])
                         ok = sw_check_key(f, o, h, tk)
                         if ok is False:
                             raise SwitchKeyError("the title key from the ticket doesn't open the game's data, so these keys don't match this game")
@@ -7902,7 +7902,7 @@ def sw_nca_files(f, off, hd, h, key):
     """What one NCA holds that goes into a NUP -> [(folder name, path parts, read, offset inside the section, size)]: a program NCA's exefs and romfs,
     a data NCA's romfs. Anything else (control, legal, offline html, meta) has no place in a NUP."""
     out = []
-    if hd["ctype"] not in (0, 4):
+    if hd["ctype"] not in (0, 4, 5):                                       # program, data, public data (extra content is public data)
         return out
     for idx in range(4):
         start, end = struct.unpack("<II", h[0x240 + 0x10 * idx:0x248 + 0x10 * idx])
@@ -7947,15 +7947,17 @@ def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False):
             f = handles.get(i["path"])
             if f is None:
                 f = handles[i["path"]] = open(i["path"], "rb")
-            nth = 0
+            nth = got = want = 0
             for nm, o, _sz in t["ncas"]:
                 hd, h = sw_nca_head(f, o, keys)
-                if hd["ctype"] not in (0, 4):
+                if hd["ctype"] not in ((0,) if t["kind"] == "base" else (4, 5)):      # a game's program; extra content is public data (or data)
                     continue
+                want += 1
                 key = sw_content_key(f, o, hd, h, keys, i["tiks"])
                 files = sw_nca_files(f, o, hd, h, key)
                 if not files:
                     continue
+                got += 1
                 if t["kind"] == "base":
                     root = dest / "base"
                 else:
@@ -7963,6 +7965,8 @@ def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False):
                     nth += 1
                 for folder, parts, rd, rel, size in files:
                     jobs.append((root.joinpath(folder, *parts), rd, rel, size))
+            if want and not got:                             # better to say so than to hand back a NUP that quietly lacks something (extra content with no data at all is fine)
+                raise UnpackError(f"the {t['kind']} {t['tid']:016X} has data, but none this program can put into a NUP")
         total = sum(j[3] for j in jobs)
         free = shutil.disk_usage(dest.parent).free if dest.parent.exists() else 1 << 62
         if free < total + (256 << 20):

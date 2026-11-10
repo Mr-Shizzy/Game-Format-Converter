@@ -181,7 +181,7 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 | PS3 ISO to folder | RPCS3 | Plays |
 | Switch NSP with a ticket to XCI; XCI to NSP (a base game with an update and seven DLC); the same game split into nine NSPs and joined into an XCI again | An emulator | Worked: the update and all seven DLC were active in the game that had them |
 | Switch 2 folder to NUP (base + update, a 6.5 GB game) | Eglantine, a Switch 2 emulator build | Loaded and played |
-| Switch NSP with a ticket to NUP (four base games, the largest 7.2 GB with 4,678 files) | None: read back and checked only | Unpacked with prod.keys, every file read back against its checksum; the files look right (a GBA ROM header and the exefs `NSO0` mark) |
+| Switch NSP with a ticket to NUP (four base games, the largest 7.2 GB with 4,678 files; and one game with two DLC and an update, which is left out) | None: read back and checked only | Unpacked with prod.keys, every file read back against its checksum; the files look right (a GBA ROM header and the exefs `NSO0` mark) |
 | 3DS: `.zcci` made by this program | Azahar | Boots and runs |
 | 3DS: `.cia` made from a decrypted dump | Azahar | Installs and runs (title screen reached) |
 | 3DS: `.3ds` made from that CIA | Azahar | Boots |
