@@ -8111,51 +8111,83 @@ def sw_nup_titles(infos):
     return sw_select(infos)
 
 
-def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False, check=False):
+def sw_program_id(hd):
+    """The program an NCA belongs to, the same number for a game's program and its update's (an update's id is the game's plus 0x800)."""
+    return hd["tid"] & ~0x800
+
+
+def sw_program_ids(f, t, keys):
+    """The programs one title (a game or its update) holds, by sw_program_id."""
+    ids = set()
+    for _nm, o, _sz in t["ncas"]:
+        hd, _h = sw_nca_head(f, o, keys)
+        if hd["ctype"] == 0:
+            ids.add(sw_program_id(hd))
+    return ids
+
+
+def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False, check=False, game_folder=False):
     """Switch packages (NSP / XCI) -> a folder in the layout nup_bundle reads: base/ and updates/<version>/ (exefs, romfs; the update's romfs is the game's
     with the patch merged in), and dlc/<id>/<n>/ (romfs). Uses the user's keys. `check` tests every romfs against the checksums its NCA stores (for an update, the merged result).
+    With `game_folder`, the game goes straight into dest (or dest/base/ beside dlc/), with its update merged in, the layout emulators and recomps read.
+    A collection (several programs in one game, like Super Mario 3D All-Stars) keeps its first program there and each other one in programs/<id>/.
     -> (total bytes written, [titles left out]). Raises SwitchKeyError or UnpackError."""
     sw_need(keys, "header_key")
     chosen, left_out = sw_nup_titles(infos)
     if not any(t["kind"] == "base" for _i, t in chosen):
-        raise UnpackError("there is no game in what was added (only an update or extra content), and a NUP needs the game's own files")
+        raise UnpackError("there is no game in what was added (only an update or extra content), and the game's own files are needed")
     base_tid = next(t["tid"] for _i, t in chosen if t["kind"] == "base")
     for _i, t in chosen:
         if t["kind"] == "update" and t["base"] != base_tid:
             raise UnpackError(f"the update (for game {t['base']:016X}) is for a different game than the one added (game {base_tid:016X})")
-    dest, jobs, handles, base_rd = Path(dest), [], {}, None
+    has_dlc = any(t["kind"] == "dlc" for _i, t in chosen)
+    dest, jobs, handles, base_rds, updated = Path(dest), [], {}, {}, set()
+    def handle(i):
+        if i["path"] not in handles:
+            handles[i["path"]] = open(i["path"], "rb")
+        return handles[i["path"]]
     try:
         for i, t in chosen:
-            f = handles.get(i["path"])
-            if f is None:
-                f = handles[i["path"]] = open(i["path"], "rb")
-            nth = got = want = 0
-            for nm, o, _sz in t["ncas"]:
+            f = handle(i)
+            ncas = []
+            for _nm, o, _sz in t["ncas"]:
                 hd, h = sw_nca_head(f, o, keys)
-                if hd["ctype"] not in ((0,) if t["kind"] in ("base", "update") else (4, 5)):
-                    continue
-                want += 1
+                if hd["ctype"] in ((0,) if t["kind"] in ("base", "update") else (4, 5)):
+                    ncas.append((o, hd, h))
+            first = min((sw_program_id(hd) for _o, hd, _h in ncas), default=None)
+            if t["kind"] == "base" and game_folder:          # the programs the update replaces are written from the update, which holds them whole
+                for ui, ut in chosen:
+                    if ut["kind"] == "update":
+                        updated |= sw_program_ids(handle(ui), ut, keys)
+            nth = got = 0
+            for o, hd, h in ncas:
+                pid = sw_program_id(hd)
                 key = sw_content_key(f, o, hd, h, keys, i["tiks"])
-                files, stored = sw_nca_files(f, o, hd, h, key, base_rd if t["kind"] == "update" else None, check, stopped)
+                files, stored = sw_nca_files(f, o, hd, h, key, base_rds.get(pid) if t["kind"] == "update" else None, check, stopped)
+                if t["kind"] == "base":
+                    base_rds[pid] = stored                   # each program's update is made from that program's romfs, as stored (before unpacking compressed blocks)
                 if not files:
                     continue
                 got += 1
-                if t["kind"] == "base":
-                    root = dest / "base"
-                    base_rd = stored                         # the update's romfs is made from this one, as stored (before any unpacking of compressed blocks)
-                elif t["kind"] == "update":
-                    root = dest / "updates" / str(t["version"])
-                else:
+                if t["kind"] == "dlc":
                     root = dest / "dlc" / f"{t['tid']:016X}" / str(nth)
                     nth += 1
+                elif game_folder:
+                    root = dest / "base" if has_dlc else dest
+                    if t["kind"] == "base" and pid in updated:
+                        continue
+                else:
+                    root = dest / "base" if t["kind"] == "base" else dest / "updates" / str(t["version"])
+                if t["kind"] != "dlc" and pid != first:      # before, every program went to the same folder and the last one overwrote the others
+                    root = root / "programs" / f"{pid:016X}"
                 for folder, parts, rd, rel, size in files:
                     jobs.append((root.joinpath(folder, *parts), rd, rel, size))
-            if want and not got:                             # better to say so than to hand back a NUP that quietly lacks something (extra content with no data at all is fine)
+            if ncas and not got:                             # better to say so than to hand back a NUP that quietly lacks something (extra content with no data at all is fine)
                 raise UnpackError(f"the {t['kind']} {t['tid']:016X} has data, but none this program can put into a NUP")
         total = sum(j[3] for j in jobs)
         free = shutil.disk_usage(dest.parent).free if dest.parent.exists() else 1 << 62
         if free < total + (256 << 20):
-            raise UnpackError(f"there isn't room to unpack this game first: it needs about {fmt_size(total)} free next to where the NUP goes, and there is {fmt_size(free)}")
+            raise UnpackError(f"there isn't room to unpack this game: it needs about {fmt_size(total)} free where it is unpacked, and there is {fmt_size(free)}")
         done = 0
         for tgt, rd, rel, size in jobs:
             tgt.parent.mkdir(parents=True, exist_ok=True)
