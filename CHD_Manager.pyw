@@ -4449,11 +4449,12 @@ class Job:
             return [("nup", target_label("nup"))]
         if self.container == "nup":                 # a NUP: the folder it holds
             return [("folder", target_label("folder"))]
-        if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, or one package per title
+        if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, one package per title, a NUP, or the game's own files
             titles = [t for i in self.nsps for t in i["titles"]]
             keys = ["xci", "nsp"] if len(self.nsps) > 1 else ["xci"] if self.container == "swnsp" else ["nsp"]
             if len(titles) > 1 and all(t["kind"] for t in titles):
                 keys.append("split")
+            keys += ["nup", "folder"]
             return [(k, target_label(k)) for k in keys]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
@@ -6941,7 +6942,7 @@ def sw_content_key(f, off, hd, h, keys, tiks):
         if t is None:
             raise SwitchKeyError("a file in this game needs a ticket that isn't in the package")
         rid, enc, rev, _ty = t
-        return aes_ecb(sw_title_kek(keys, rev), True)(enc)
+        return aes_ecb(sw_title_kek(keys, max(rev, hd["gen"])), True)(enc)      # older tickets carry 0 here; the file's own key generation is what the console uses
     return aes_ecb(sw_area_key(keys, hd["gen"], hd["slot"]), True)(h[0x300:0x340])[0x20:0x30]
 
 
@@ -7121,7 +7122,7 @@ def sw_plan(infos, keys, latest_only=True):
                         tk_ = i["tiks"].get(hd["rights"])
                         if tk_ is None:
                             raise SwitchKeyError(f"{nm} needs a ticket that {i['path'].name} doesn't hold")
-                        tk = aes_ecb(sw_title_kek(keys, tk_[2]), True)(tk_[1])
+                        tk = aes_ecb(sw_title_kek(keys, max(tk_[2], hd["gen"])), True)(tk_[1])
                         ok = sw_check_key(f, o, h, tk)
                         if ok is False:
                             raise SwitchKeyError("the title key from the ticket doesn't open the game's data, so these keys don't match this game")
@@ -7340,10 +7341,10 @@ def build_nsp(files, dest, prog=None, stopped=lambda: False):
             f.close()
 
 
-# ---- Switch 2: NUP, a community container for decrypted game folders (experimental)
+# ---- Switch and Switch 2: NUP, a community container for decrypted game folders (experimental)
 # Written from the public draft "NUP - NX Package Format" 1.0-draft by a55uka (github.com/a55uka/nup). It holds a game's decrypted exefs and romfs
 # folders (and optionally an update and extra content), each file stored raw or as one zstd frame, with a SHA-256 of every file and of the table.
-# It uses no keys and does no decrypting. Nothing here has been tried in an emulator by the author.
+# The NUP code itself uses no keys and does no decrypting (the NSP / XCI -> NUP step further down does, with the user's own keys).
 NUP_KINDS = {0: "game", 1: "update", 2: "extra content"}
 NUP_RAW_OVER = 256 * 1024 * 1024                  # files bigger than this are not compressed (the NSP-Box tool does the same by default)
 
@@ -7579,10 +7580,30 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
                 metas.append((0, 0))
         total, done = max(1, sum(f[3] for f in allf)), 0
         cctx = z.ZstdCompressor(level=level)
+        size_n, shared = {}, {}                              # files of equal content share one extent (spec 3.6): found by size first, so only possible twins are read twice
+        for _pi, _parts, _fp, sz in allf:
+            size_n[sz] = size_n.get(sz, 0) + 1
         for i, (pi, parts, fp, size) in enumerate(allf):
             if size == 0:
                 ext[i] = (0, 0, hashlib.sha256(b"").digest(), 0)
                 continue
+            if size_n[size] > 1:
+                dh = hashlib.sha256()
+                with open(fp, "rb") as f:
+                    while True:
+                        if stopped():
+                            raise UnpackError("stopped")
+                        b = f.read(1 << 22)
+                        if not b:
+                            break
+                        dh.update(b)
+                twin = shared.get((dh.digest(), size))
+                if twin:
+                    ext[i] = (twin[0], twin[1], dh.digest(), twin[2])
+                    done += size
+                    if prog:
+                        prog(done / total)
+                    continue
             start = out.tell()
             h = hashlib.sha256()
             raw_only = size > NUP_RAW_OVER                  # big files are stored as they are: Eglantine unpacks big compressed ones into a temp folder it may not have made
@@ -7615,6 +7636,7 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
                 csize, codec = size, 0
             out.write(bytes(-out.tell() % 16))
             ext[i] = (start, csize, h.digest(), codec)
+            shared[(h.digest(), size)] = (start, csize, codec)
         toc = bytearray()
         toc += b"TOC\x01" + struct.pack("<IQQQQQ", npk, nd, nf, pool_off, pool_size, 0)
         for pi, x in enumerate(pkgs):
@@ -7816,6 +7838,376 @@ def nup_extract(path, dest, prog=None, stopped=lambda: False):
     finally:
         close()
     return pk
+
+
+# ---- Switch NSP / XCI -> NUP: the game's exefs and romfs taken out of its NCA files with the user's own keys (the same keys as NSP <-> XCI)
+# A game's program NCA holds the exefs (section 0, a PFS0) and the romfs (section 1, an IVFC tree); extra content (DLC) is a data NCA with a romfs.
+# An update is a patch against the game's romfs (a BKTR section): its romfs is the game's, with the patch's ranges swapped in, so reading it needs the game's romfs too.
+def sw_ctr_read(f, off, start, fs, key, rel, n, ctr_val=None):
+    """n bytes at `rel` inside an AES-CTR section that starts at `start` in the NCA at `off`. `ctr_val` replaces the generation in the counter (the patch sections use one per range)."""
+    f.seek(off + start + rel)
+    raw = f.read(n)
+    iv = bytes(fs[0x140:0x148][::-1])
+    if ctr_val is not None:
+        iv = iv[:4] + struct.pack(">I", ctr_val)
+    return _xor(raw, ctr_keystream(aes_ecb(key), iv + bytes(8), start + rel, len(raw)))
+
+
+def sw_bktr_table(rd, off, size, fmt, bad):
+    """One of a patch section's two tables (a header with the bucket count, then buckets of 0x4000 bytes) -> (entries as tuples, total size)."""
+    head = rd(off, 0x10)
+    _pad, nb, total = struct.unpack("<IIQ", head)
+    esz = struct.calcsize(fmt)
+    if not 0 < nb <= 0x1000 or size < 0x4000 * (nb + 1):
+        raise UnpackError(bad)
+    out = []
+    for b in range(nb):
+        blk = rd(off + 0x4000 * (b + 1), 0x4000)
+        _p, ne, _end = struct.unpack("<IIQ", blk[:16])
+        if len(blk) < 0x4000 or 16 + ne * esz > 0x4000:
+            raise UnpackError(bad)
+        out += [struct.unpack(fmt, blk[16 + k * esz:16 + (k + 1) * esz]) for k in range(ne)]
+    return out, total
+
+
+def sw_bktr_reader(f, off, h, idx, key, base_rd):
+    """read(virtual offset, n) for an update's romfs section: the game's own romfs (read through `base_rd`) with the update's data swapped in where its tables say."""
+    fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    start, end = struct.unpack("<II", h[0x240 + 0x10 * idx:0x248 + 0x10 * idx])
+    start, secsize = start * 0x200, (end - start) * 0x200
+    ro, rs, so, ss = struct.unpack("<QQ", fs[0x100:0x110]) + struct.unpack("<QQ", fs[0x120:0x130])
+    if fs[0x110:0x114] != b"BKTR" or fs[0x130:0x134] != b"BKTR":
+        raise UnpackError("this update's data has a layout this program doesn't know")
+    tab = lambda rel, n: sw_ctr_read(f, off, start, fs, key, rel, n)          # noqa: E731  (the tables themselves use the section's counter as it is)
+    bad = "this update's patch tables can't be read; the keys may not match this game"
+    relocs, total = sw_bktr_table(tab, ro, rs, "<QQI", bad)
+    subs, _t = sw_bktr_table(tab, so, ss, "<QII", bad)
+    if not relocs or not subs or relocs[0][0] != 0:
+        raise UnpackError(bad)
+    rv, sv = [r[0] for r in relocs], [s[0] for s in subs]
+
+    def from_patch(phys, n):
+        out = b""
+        while n > 0:
+            j = max(bisect.bisect_right(sv, phys) - 1, 0)
+            stop = sv[j + 1] if j + 1 < len(sv) else secsize
+            take = min(n, max(stop - phys, 1))
+            out += sw_ctr_read(f, off, start, fs, key, phys, take, subs[j][2])
+            phys, n = phys + take, n - take
+        return out
+
+    def read(virt, n):
+        out = bytearray()
+        while n > 0:
+            i = bisect.bisect_right(rv, virt) - 1
+            if i < 0 or virt >= total:
+                raise UnpackError("this update's patch tables don't cover all of the game's files")
+            v0, p0, patch = relocs[i]
+            take = min(n, (relocs[i + 1][0] if i + 1 < len(relocs) else total) - virt)
+            b = from_patch(p0 + virt - v0, take) if patch else base_rd(p0 + virt - v0, take)
+            if len(b) < take:
+                raise UnpackError("the game's data is cut short")
+            out += b
+            virt, n = virt + take, n - take
+        return bytes(out)
+    return read
+
+
+def sw_ivfc_check(rd, fs, stopped=lambda: False):
+    """True when every block of a romfs section's data matches the hashes stored for it (the section's own integrity check). `rd` reads inside the section."""
+    ivfc = fs[8:0x100]
+    levels = struct.unpack("<I", ivfc[0xC:0x10])[0]
+    ent = [struct.unpack("<QQII", ivfc[0x10 + 0x18 * i:0x28 + 0x18 * i]) for i in range(levels - 1)]
+    (doff, dsize, dbs, _r), (hoff, _hs, _b, _r2) = ent[-1], ent[-2]
+    block = 1 << dbs
+    done = 0
+    while done < dsize:
+        if stopped():
+            raise UnpackError("stopped")
+        n = min(dsize - done, block * 256)
+        data = rd(doff + done, n)
+        want = rd(hoff + 32 * (done // block), 32 * ((n + block - 1) // block))
+        for k in range(0, n, block):
+            b = data[k:k + block]
+            if hashlib.sha256(b + bytes(block - len(b))).digest() != want[32 * (k // block):32 * (k // block) + 32]:
+                return False
+        done += n
+    return True
+
+
+def sw_sec_reader(f, off, h, idx, key, base_rd=None):
+    """read(rel, n) for one NCA section: the bytes at `rel` inside it, opened with the content key (AES-CTR) or as they are (a section that isn't encrypted).
+    An update's romfs (a patch section) is read through `base_rd`, a reader for the game's own romfs section."""
+    fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    if fs[0x158:0x15C] == b"BKTR":                                         # sparse: parts of the section are kept in another package
+        raise UnpackError("this game keeps part of its files in another package (a sparse layout), which this program can't read yet")
+    if fs[4] == 4:
+        if base_rd is None:
+            raise UnpackError("this is an update, and it can only be unpacked together with the game's own files (add the game's NSP or XCI as well)")
+        return sw_bktr_reader(f, off, h, idx, key, base_rd)
+    if fs[4] == 3:
+        return lambda rel, n: sw_section_read(f, off, h, idx, key, rel, n)
+    if fs[4] == 1:
+        start = struct.unpack("<I", h[0x240 + 0x10 * idx:0x244 + 0x10 * idx])[0] * 0x200
+
+        def plain(rel, n):
+            f.seek(off + start + rel)
+            return f.read(n)
+        return plain
+    raise UnpackError("part of this game is stored as a patch (or in a form this program can't open yet), so it can't go into a NUP")
+
+
+def sw_unpacked_romfs(stored, fs, base):
+    """A romfs section's files as the game reads them -> (read, where the romfs tables start). Most games store them as they are. Newer ones (Echoes of
+    Wisdom, Mario Party Jamboree) keep them in LZ4 blocks, listed in a compression table that counts from the start of the romfs level, not of the section.
+    `stored` reads the section as its hashes cover it, so the hash check runs on that and the unpacking comes after."""
+    if fs[0x188:0x18C] != b"BKTR":
+        return stored, base
+    toff, tsize = struct.unpack("<QQ", fs[0x178:0x188])
+
+    def level(rel, n):
+        return stored(base + rel, n)
+    bad = "this game's table of compressed blocks can't be read; the keys may not match this game"
+    ents, total = sw_bktr_table(level, toff, tsize, "<qqBbHI", bad)
+    if not ents or ents[0][0] != 0:
+        raise UnpackError(bad)
+    starts = [e[0] for e in ents]
+    last = {}                                                    # the block unpacked last: reads go forward, often several per block
+
+    def block(i, size):
+        if i not in last:
+            _v, phys, _k, _lvl, _r, psize = ents[i]
+            try:
+                data = lz4_decompress(level(phys, psize), size)
+            except UnpackError:
+                raise UnpackError("a compressed block of this game is damaged") from None
+            last.clear()
+            last[i] = data
+        return last[i]
+
+    def read(at, n):
+        out = bytearray()
+        while n > 0:
+            i = bisect.bisect_right(starts, at) - 1
+            if i < 0 or at >= total:
+                raise UnpackError("the game's files are cut short")
+            virt, phys, kind, _lvl, _r, _ps = ents[i]
+            stop = starts[i + 1] if i + 1 < len(starts) else total
+            take, rel = min(n, stop - at), at - virt
+            if kind == 0:                                        # stored as it is
+                out += level(phys + rel, take)
+            elif kind == 1:                                      # all zeros
+                out += bytes(take)
+            elif kind == 3:                                      # one LZ4 block
+                out += block(i, stop - virt)[rel:rel + take]
+            else:
+                raise UnpackError(f"this game's files are compressed in a way this program doesn't read yet (type {kind})")
+            at += take
+            n -= take
+        return bytes(out)
+    return read, 0
+
+
+def sw_safe_name(raw):
+    """One file or folder name from a romfs or exefs table, checked so that nothing can be written outside the folder it is unpacked into."""
+    nm = raw.decode("utf-8", "replace")
+    if nm in ("", ".", "..") or any(c in nm for c in '/\\:\0'):
+        raise UnpackError("this game holds a file name that isn't safe to unpack, so nothing was written")
+    return nm
+
+
+def sw_pfs0_tree(rd, base):
+    """The files of a PFS0 at `base` inside a section -> [(path parts, offset inside the section, size)]."""
+    head = rd(base, 16)
+    if len(head) < 16 or head[:4] != b"PFS0":
+        raise UnpackError("the game's exefs can't be read (it doesn't start like one); the keys may not match this game")
+    n, strsz = struct.unpack("<II", head[4:12])
+    if not 0 < n < 4096 or strsz > 1 << 20:
+        raise UnpackError("the game's exefs has a damaged file list")
+    ents, strs = rd(base + 16, 24 * n), rd(base + 16 + 24 * n, strsz)
+    if len(ents) < 24 * n or len(strs) < strsz:
+        raise UnpackError("the game's exefs is cut short")
+    data0 = base + 16 + 24 * n + strsz
+    out = []
+    for i in range(n):
+        o, sz, so, _r = struct.unpack("<QQII", ents[24 * i:24 * i + 24])
+        out.append(((sw_safe_name(strs[so:].split(b"\0", 1)[0]),), data0 + o, sz))
+    return out
+
+
+def sw_romfs_tree(rd, base):
+    """The files of a romfs (its tables start at `base` inside the section) -> [(path parts, offset inside the section, size)]."""
+    hd = rd(base, 0x50)
+    if len(hd) < 0x50:
+        raise UnpackError("the game's romfs is cut short")
+    v = struct.unpack("<10Q", hd)
+    dmo, dms, fmo, fms, dat = v[3], v[4], v[7], v[8], v[9]
+    if v[0] != 0x50 or dms > 1 << 28 or fms > 1 << 28 or not dms:
+        raise UnpackError("the game's romfs can't be read (its header isn't right); the keys may not match this game")
+    dirs, fls = rd(base + dmo, dms), rd(base + fmo, fms)
+    if len(dirs) < dms or len(fls) < fms:
+        raise UnpackError("the game's romfs is cut short")
+    out, stack, seen, none = [], [(0, ())], set(), 0xFFFFFFFF
+    while stack:
+        d, path = stack.pop()
+        if d in seen or d + 24 > len(dirs):
+            raise UnpackError("the game's romfs has a damaged folder table")
+        seen.add(d)
+        _p, _sib, child, fil, _h, _nl = struct.unpack("<6I", dirs[d:d + 24])
+        while fil != none:
+            if fil + 32 > len(fls) or len(out) > 1 << 22:
+                raise UnpackError("the game's romfs has a damaged file table")
+            _p, sib, o, sz, _h, nl = struct.unpack("<IIQQII", fls[fil:fil + 32])
+            out.append((path + (sw_safe_name(fls[fil + 32:fil + 32 + nl]),), base + dat + o, sz))
+            fil = sib
+        while child != none:
+            if child + 24 > len(dirs):
+                raise UnpackError("the game's romfs has a damaged folder table")
+            _p, sib, _c, _f, _h, nl = struct.unpack("<6I", dirs[child:child + 24])
+            stack.append((child, path + (sw_safe_name(dirs[child + 24:child + 24 + nl]),)))
+            child = sib
+    return out
+
+
+def sw_nca_files(f, off, hd, h, key, base_rd=None, check=False, stopped=lambda: False):
+    """What one NCA holds that goes into a NUP -> ([(folder name, path parts, read, offset inside the section, size)], its romfs section as stored or None):
+    a program NCA's exefs and romfs, a data NCA's romfs. Anything else (control, legal, offline html, meta) has no place in a NUP. For an update, `base_rd`
+    reads the game's own romfs section as stored, and `check` also tests each romfs (for an update, the merged one) against the hashes the NCA stores for it."""
+    out, stored = [], None
+    if hd["ctype"] not in (0, 4, 5):                                       # program, data, public data (extra content is public data)
+        return out, stored
+    for idx in range(4):
+        start, end = struct.unpack("<II", h[0x240 + 0x10 * idx:0x248 + 0x10 * idx])
+        fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+        if end <= start:
+            continue
+        if fs[2] == 1 and idx == 0 and hd["ctype"] == 0:                  # the exefs (section 2 of a program is its logo, left out)
+            rd = sw_sec_reader(f, off, h, idx, key)
+            base = sw_pfs0_start(h, idx)
+            if base is None or fs[0x188:0x18C] == b"BKTR":
+                raise UnpackError("the game's exefs has a layout this program doesn't know")
+            out += [("exefs", p, rd, o, sz) for p, o, sz in sw_pfs0_tree(rd, base)]
+        elif fs[2] == 0:                                                 # a romfs
+            ivfc = fs[8:0x100]
+            if ivfc[:4] != b"IVFC":
+                raise UnpackError("the game's romfs has a layout this program doesn't know")
+            levels = struct.unpack("<I", ivfc[0xC:0x10])[0]
+            if not 2 <= levels <= 7:
+                raise UnpackError("the game's romfs has a damaged header")
+            base = struct.unpack("<Q", ivfc[0x10 + 0x18 * (levels - 2):0x18 + 0x18 * (levels - 2)])[0]
+            stored = sw_sec_reader(f, off, h, idx, key, base_rd)
+            if check and not sw_ivfc_check(stored, fs, stopped):
+                raise UnpackError("the update and the game's files didn't fit together: the result doesn't match the checksums stored in the update. "
+                                  "Is this update for this game (and this version of it)?" if fs[4] == 4 else
+                                  "the unpacked files don't match the checksums stored in the game, so the keys or the file may be wrong")
+            rd, base = sw_unpacked_romfs(stored, fs, base)
+            out += [("romfs", p, rd, o, sz) for p, o, sz in sw_romfs_tree(rd, base)]
+    return out, stored
+
+
+def sw_nup_titles(infos):
+    """The titles that go into a NUP, and the older ones left out -> (chosen [(info, title)], left out [(info, title)]). Of several updates the newest is
+    used: it is a patch against the game itself, not against the update before it."""
+    return sw_select(infos)
+
+
+def sw_program_id(hd):
+    """The program an NCA belongs to, the same number for a game's program and its update's (an update's id is the game's plus 0x800)."""
+    return hd["tid"] & ~0x800
+
+
+def sw_program_ids(f, t, keys):
+    """The programs one title (a game or its update) holds, by sw_program_id."""
+    ids = set()
+    for _nm, o, _sz in t["ncas"]:
+        hd, _h = sw_nca_head(f, o, keys)
+        if hd["ctype"] == 0:
+            ids.add(sw_program_id(hd))
+    return ids
+
+
+def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False, check=False, game_folder=False):
+    """Switch packages (NSP / XCI) -> a folder in the layout nup_bundle reads: base/ and updates/<version>/ (exefs, romfs; the update's romfs is the game's
+    with the patch merged in), and dlc/<id>/<n>/ (romfs). Uses the user's keys. `check` tests every romfs against the checksums its NCA stores (for an update, the merged result).
+    With `game_folder`, the game goes straight into dest (or dest/base/ beside dlc/), with its update merged in, the layout emulators and recomps read.
+    A collection (several programs in one game, like Super Mario 3D All-Stars) keeps its first program there and each other one in programs/<id>/.
+    -> (total bytes written, [titles left out]). Raises SwitchKeyError or UnpackError."""
+    sw_need(keys, "header_key")
+    chosen, left_out = sw_nup_titles(infos)
+    if not any(t["kind"] == "base" for _i, t in chosen):
+        raise UnpackError("there is no game in what was added (only an update or extra content), and the game's own files are needed")
+    base_tid = next(t["tid"] for _i, t in chosen if t["kind"] == "base")
+    for _i, t in chosen:
+        if t["kind"] == "update" and t["base"] != base_tid:
+            raise UnpackError(f"the update (for game {t['base']:016X}) is for a different game than the one added (game {base_tid:016X})")
+    has_dlc = any(t["kind"] == "dlc" for _i, t in chosen)
+    dest, jobs, handles, base_rds, updated = Path(dest), [], {}, {}, set()
+    def handle(i):
+        if i["path"] not in handles:
+            handles[i["path"]] = open(i["path"], "rb")
+        return handles[i["path"]]
+    try:
+        for i, t in chosen:
+            f = handle(i)
+            ncas = []
+            for _nm, o, _sz in t["ncas"]:
+                hd, h = sw_nca_head(f, o, keys)
+                if hd["ctype"] in ((0,) if t["kind"] in ("base", "update") else (4, 5)):
+                    ncas.append((o, hd, h))
+            first = min((sw_program_id(hd) for _o, hd, _h in ncas), default=None)
+            if t["kind"] == "base" and game_folder:          # the programs the update replaces are written from the update, which holds them whole
+                for ui, ut in chosen:
+                    if ut["kind"] == "update":
+                        updated |= sw_program_ids(handle(ui), ut, keys)
+            nth = got = 0
+            for o, hd, h in ncas:
+                pid = sw_program_id(hd)
+                key = sw_content_key(f, o, hd, h, keys, i["tiks"])
+                files, stored = sw_nca_files(f, o, hd, h, key, base_rds.get(pid) if t["kind"] == "update" else None, check, stopped)
+                if t["kind"] == "base":
+                    base_rds[pid] = stored                   # each program's update is made from that program's romfs, as stored (before unpacking compressed blocks)
+                if not files:
+                    continue
+                got += 1
+                if t["kind"] == "dlc":
+                    root = dest / "dlc" / f"{t['tid']:016X}" / str(nth)
+                    nth += 1
+                elif game_folder:
+                    root = dest / "base" if has_dlc else dest
+                    if t["kind"] == "base" and pid in updated:
+                        continue
+                else:
+                    root = dest / "base" if t["kind"] == "base" else dest / "updates" / str(t["version"])
+                if t["kind"] != "dlc" and pid != first:      # before, every program went to the same folder and the last one overwrote the others
+                    root = root / "programs" / f"{pid:016X}"
+                for folder, parts, rd, rel, size in files:
+                    jobs.append((root.joinpath(folder, *parts), rd, rel, size))
+            if ncas and not got:                             # better to say so than to hand back a NUP that quietly lacks something (extra content with no data at all is fine)
+                raise UnpackError(f"the {t['kind']} {t['tid']:016X} has data, but none this program can put into a NUP")
+        total = sum(j[3] for j in jobs)
+        free = shutil.disk_usage(dest.parent).free if dest.parent.exists() else 1 << 62
+        if free < total + (256 << 20):
+            raise UnpackError(f"there isn't room to unpack this game: it needs about {fmt_size(total)} free where it is unpacked, and there is {fmt_size(free)}")
+        done = 0
+        for tgt, rd, rel, size in jobs:
+            tgt.parent.mkdir(parents=True, exist_ok=True)
+            with open(tgt, "wb") as g:
+                left = size
+                while left > 0:
+                    if stopped():
+                        raise UnpackError("stopped")
+                    b = rd(rel + size - left, min(left, 1 << 22))
+                    if not b:
+                        raise UnpackError("the game's data is cut short")
+                    g.write(b)
+                    left -= len(b)
+                    done += len(b)
+                    if prog:
+                        prog(done / max(1, total))
+        return total, left_out
+    finally:
+        for f in handles.values():
+            f.close()
 
 
 # ---- writing a disc image
@@ -11460,6 +11852,10 @@ class App:
             return self.do_xci_to_nsp(job, o)
         if t == "split" and job.container in ("swnsp", "swxci"):
             return self.do_sw_split(job, o)
+        if t == "nup" and job.container in ("swnsp", "swxci"):
+            return self.do_sw_to_nup(job, o)
+        if t == "folder" and job.container in ("swnsp", "swxci"):
+            return self.do_sw_to_folder(job, o)
         if t in ("z3ds", "unz3ds") and job.container == "z3ds":
             return self.do_z3ds(job, o)
         if t == "cia" and job.container == "z3ds":
@@ -12310,6 +12706,124 @@ class App:
         finally:
             part.unlink(missing_ok=True)
         if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_sw_to_nup(self, job, o):
+        """Switch packages (NSP / XCI) -> a NUP: the game's files, its newest update (merged into the game's files) and its extra content are taken out with the
+        user's own keys, then packed. Experimental."""
+        keys = parse_switch_keys(o.get("switch_keys", ""))
+        if not keys:
+            job.status, job.result = "Failed (setup needed)", ("a NUP holds a game's decrypted files, so this needs your own keys: Settings, Formats, "
+                                                               "Nintendo Switch, and choose your prod.keys file or paste it in")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        infos = job.nsps
+        if not any(t["kind"] in ("base", "") for i in infos for t in i["titles"]):
+            job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP or XCI as well, because a NUP needs the game"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        stem = job.path.stem
+        base = next((t for i in infos for t in i["titles"] if t["kind"] == "base"), None)
+        if base and not re.search(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{16}(?![0-9A-Fa-f])", stem):
+            stem += f" [{base['tid']:016X}]"
+        top = max((t["version"] for _i, t in sw_nup_titles(infos)[0] if t["kind"] == "update"), default=None)
+        if top is not None and not re.search(r"\[v\d+\]", stem):
+            stem += f"[v{top}]"
+        out, _, skip = self.handle_exists(job, self.output_path(job, o, ".nup").with_name(stem + ".nup"), o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        work = out.parent / f".{out.name[:40]}.chdm_nup"
+        self.post("log", f"\n{job.path.name}  [Switch package{'s' if len(infos) != 1 else ''} → NUP]  (experimental: the game is unpacked with your keys, then packed "
+                         "as the public draft of the format describes; it needs room for the unpacked game next to the NUP)", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Unpacking the game")
+        stop = lambda: self.stop_flag  # noqa: E731
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+            total, left_out = sw_to_nup_folder(infos, keys, work, lambda x: prog(x * 0.4), stop, check=verify)
+            job.zar_raw = total
+            for i, t in left_out:
+                self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one is in the list, and a Switch "
+                                 "update is a patch against the game itself, so only the newest is needed.", "info")
+            pkgs = nup_bundle(work) or []
+            err = nup_resolve(pkgs, work) if pkgs else "nothing in it can go into a NUP"
+            if err:
+                raise UnpackError(err)
+            prog = self.cso_progress(job, "Building NUP")
+            build_nup(pkgs, part, lambda x: prog(x * (0.35 if verify else 0.6)), stop)
+            if verify:
+                self.post("log", "Reading the new NUP back against the unpacked files…", "info")
+                nup_verify(part, pkgs, lambda x: prog(0.35 + x * 0.25), stop)
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't build)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+            shutil.rmtree(work, ignore_errors=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.zar_raw)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_sw_to_folder(self, job, o):
+        """Switch packages (NSP / XCI) -> the game's own files: exefs and romfs, with its newest update merged in, the folder emulators and recomps read
+        (PrimeRecomp, for one, only takes this). Extra content goes to dlc/<id>/<n>/ beside base/. Uses the user's own keys."""
+        keys = parse_switch_keys(o.get("switch_keys", ""))
+        if not keys:
+            job.status, job.result = "Failed (setup needed)", ("a Switch game's files are encrypted, so unpacking them needs your own keys: Settings, Formats, "
+                                                               "Nintendo Switch, and choose your prod.keys file or paste it in")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        infos = job.nsps
+        if not any(t["kind"] in ("base", "") for i in infos for t in i["titles"]):
+            job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP or XCI as well, because they only hold changes to it"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        work = out.parent / f".{out.name[:40]}.chdm_swdir"
+        self.post("log", f"\n{job.path.name}  [Switch package{'s' if len(infos) != 1 else ''} → game folder: exefs and romfs]", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Unpacking the game")
+        ok = False
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+            _total, left_out = sw_to_nup_folder(infos, keys, work, prog, lambda: self.stop_flag, check=verify, game_folder=True)
+            for i, t in left_out:
+                self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one is in the list, and a Switch "
+                                 "update is a patch against the game itself, so only the newest is needed.", "info")
+            top = max((t["version"] for _i, t in sw_nup_titles(infos)[0] if t["kind"] == "update"), default=None)
+            if top is not None:
+                self.post("log", f"Update version {top} is merged into the game's exefs and romfs.", "info")
+            os.replace(work, out)
+            ok = True
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if not ok:
+            return
+        self.folder_finish(job, out)
+        if o["delete_src"] and verify:                      # with verify on, every romfs was checked against the hashes the package stores
             self.remove_sources(job, o)
 
     def do_folder_to_nup(self, job, o):
@@ -14191,7 +14705,7 @@ def cli_main(argv):
     ap.add_argument("--wii-key", metavar="HEX", help="your Wii common key (32 hex characters); or put it in the keys folder")
     ap.add_argument("--rpcs3", metavar="EXE", help="your rpcs3.exe, used to unpack PS3 .pkg packages")
     ap.add_argument("--pkg-key", metavar="HEX", help="your own PS3 package key (32 hex characters), used to unpack .pkg packages when there is no RPCS3")
-    ap.add_argument("--switch-keys", metavar="FILE", help="your own prod.keys, used to turn Switch NSP files that have tickets into XCI")
+    ap.add_argument("--switch-keys", metavar="FILE", help="your own prod.keys, used to turn Switch NSP files that have tickets into XCI, and to unpack Switch games (NUP, game folder)")
     ap.add_argument("--dolphintool", metavar="EXE", help="your DolphinTool.exe, used for Wii RVZ/WIA when there is no key")
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
