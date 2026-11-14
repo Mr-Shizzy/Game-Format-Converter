@@ -4449,12 +4449,12 @@ class Job:
             return [("nup", target_label("nup"))]
         if self.container == "nup":                 # a NUP: the folder it holds
             return [("folder", target_label("folder"))]
-        if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, or one package per title
+        if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, one package per title, a NUP, or the game's own files
             titles = [t for i in self.nsps for t in i["titles"]]
             keys = ["xci", "nsp"] if len(self.nsps) > 1 else ["xci"] if self.container == "swnsp" else ["nsp"]
             if len(titles) > 1 and all(t["kind"] for t in titles):
                 keys.append("split")
-            keys.append("nup")
+            keys += ["nup", "folder"]
             return [(k, target_label(k)) for k in keys]
         if self.container == "ps3parts":            # a PS3 disc image kept in pieces: joined into one ISO, a CHD of it, or its files
             return [(k, target_label(k)) for k in (("iso", "chd") if self.ps3_info.get("encrypted") else ("iso", "chd", "folder"))]
@@ -11854,6 +11854,8 @@ class App:
             return self.do_sw_split(job, o)
         if t == "nup" and job.container in ("swnsp", "swxci"):
             return self.do_sw_to_nup(job, o)
+        if t == "folder" and job.container in ("swnsp", "swxci"):
+            return self.do_sw_to_folder(job, o)
         if t in ("z3ds", "unz3ds") and job.container == "z3ds":
             return self.do_z3ds(job, o)
         if t == "cia" and job.container == "z3ds":
@@ -12772,6 +12774,56 @@ class App:
         job.status, job.result = "Done", f"→ {out.name}"
         self.post("log", f"OK  {out}  ({fmt_size(job.zar_raw)} → {fmt_size(job.out_size)})", "ok")
         if o["delete_src"] and verify:
+            self.remove_sources(job, o)
+
+    def do_sw_to_folder(self, job, o):
+        """Switch packages (NSP / XCI) -> the game's own files: exefs and romfs, with its newest update merged in, the folder emulators and recomps read
+        (PrimeRecomp, for one, only takes this). Extra content goes to dlc/<id>/<n>/ beside base/. Uses the user's own keys."""
+        keys = parse_switch_keys(o.get("switch_keys", ""))
+        if not keys:
+            job.status, job.result = "Failed (setup needed)", ("a Switch game's files are encrypted, so unpacking them needs your own keys: Settings, Formats, "
+                                                               "Nintendo Switch, and choose your prod.keys file or paste it in")
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        infos = job.nsps
+        if not any(t["kind"] in ("base", "") for i in infos for t in i["titles"]):
+            job.status, job.result = "Failed (setup needed)", "only an update or extra content was added; add the game's own NSP or XCI as well, because they only hold changes to it"
+            self.post("log", f"{job.path.name}: {job.result}", "err")
+            return
+        out, skip = self.folder_target(job, o)
+        if skip:
+            return
+        work = out.parent / f".{out.name[:40]}.chdm_swdir"
+        self.post("log", f"\n{job.path.name}  [Switch package{'s' if len(infos) != 1 else ''} → game folder: exefs and romfs]", "info")
+        verify = self.verify_wanted()
+        prog = self.cso_progress(job, "Unpacking the game")
+        ok = False
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+            _total, left_out = sw_to_nup_folder(infos, keys, work, prog, lambda: self.stop_flag, check=verify, game_folder=True)
+            for i, t in left_out:
+                self.post("log", f"{i['path'].name}: the {t['kind'] or 'title'} version {t['version']} was left out, because a newer one is in the list, and a Switch "
+                                 "update is a patch against the game itself, so only the newest is needed.", "info")
+            top = max((t["version"] for _i, t in sw_nup_titles(infos)[0] if t["kind"] == "update"), default=None)
+            if top is not None:
+                self.post("log", f"Update version {top} is merged into the game's exefs and romfs.", "info")
+            os.replace(work, out)
+            ok = True
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't unpack)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if not ok:
+            return
+        self.folder_finish(job, out)
+        if o["delete_src"] and verify:                      # with verify on, every romfs was checked against the hashes the package stores
             self.remove_sources(job, o)
 
     def do_folder_to_nup(self, job, o):
@@ -14653,7 +14705,7 @@ def cli_main(argv):
     ap.add_argument("--wii-key", metavar="HEX", help="your Wii common key (32 hex characters); or put it in the keys folder")
     ap.add_argument("--rpcs3", metavar="EXE", help="your rpcs3.exe, used to unpack PS3 .pkg packages")
     ap.add_argument("--pkg-key", metavar="HEX", help="your own PS3 package key (32 hex characters), used to unpack .pkg packages when there is no RPCS3")
-    ap.add_argument("--switch-keys", metavar="FILE", help="your own prod.keys, used to turn Switch NSP files that have tickets into XCI")
+    ap.add_argument("--switch-keys", metavar="FILE", help="your own prod.keys, used to turn Switch NSP files that have tickets into XCI, and to unpack Switch games (NUP, game folder)")
     ap.add_argument("--dolphintool", metavar="EXE", help="your DolphinTool.exe, used for Wii RVZ/WIA when there is no key")
     ap.add_argument("--rvz-method", choices=("zstd", "lzma", "lzma2", "bzip2", "none"), help="RVZ/WIA compression (default zstd)")
     ap.add_argument("--rvz-level", type=int, choices=range(1, 10), metavar="1-9", help="RVZ/WIA compression level (default 5)")
