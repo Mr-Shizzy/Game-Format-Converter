@@ -7939,6 +7939,8 @@ def sw_sec_reader(f, off, h, idx, key, base_rd=None):
     """read(rel, n) for one NCA section: the bytes at `rel` inside it, opened with the content key (AES-CTR) or as they are (a section that isn't encrypted).
     An update's romfs (a patch section) is read through `base_rd`, a reader for the game's own romfs section."""
     fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
+    if fs[0x158:0x15C] == b"BKTR":                                         # sparse: parts of the section are kept in another package
+        raise UnpackError("this game keeps part of its files in another package (a sparse layout), which this program can't read yet")
     if fs[4] == 4:
         if base_rd is None:
             raise UnpackError("this is an update, and it can only be unpacked together with the game's own files (add the game's NSP or XCI as well)")
@@ -7953,6 +7955,57 @@ def sw_sec_reader(f, off, h, idx, key, base_rd=None):
             return f.read(n)
         return plain
     raise UnpackError("part of this game is stored as a patch (or in a form this program can't open yet), so it can't go into a NUP")
+
+
+def sw_unpacked_romfs(stored, fs, base):
+    """A romfs section's files as the game reads them -> (read, where the romfs tables start). Most games store them as they are. Newer ones (Echoes of
+    Wisdom, Mario Party Jamboree) keep them in LZ4 blocks, listed in a compression table that counts from the start of the romfs level, not of the section.
+    `stored` reads the section as its hashes cover it, so the hash check runs on that and the unpacking comes after."""
+    if fs[0x188:0x18C] != b"BKTR":
+        return stored, base
+    toff, tsize = struct.unpack("<QQ", fs[0x178:0x188])
+
+    def level(rel, n):
+        return stored(base + rel, n)
+    bad = "this game's table of compressed blocks can't be read; the keys may not match this game"
+    ents, total = sw_bktr_table(level, toff, tsize, "<qqBbHI", bad)
+    if not ents or ents[0][0] != 0:
+        raise UnpackError(bad)
+    starts = [e[0] for e in ents]
+    last = {}                                                    # the block unpacked last: reads go forward, often several per block
+
+    def block(i, size):
+        if i not in last:
+            _v, phys, _k, _lvl, _r, psize = ents[i]
+            try:
+                data = lz4_decompress(level(phys, psize), size)
+            except UnpackError:
+                raise UnpackError("a compressed block of this game is damaged") from None
+            last.clear()
+            last[i] = data
+        return last[i]
+
+    def read(at, n):
+        out = bytearray()
+        while n > 0:
+            i = bisect.bisect_right(starts, at) - 1
+            if i < 0 or at >= total:
+                raise UnpackError("the game's files are cut short")
+            virt, phys, kind, _lvl, _r, _ps = ents[i]
+            stop = starts[i + 1] if i + 1 < len(starts) else total
+            take, rel = min(n, stop - at), at - virt
+            if kind == 0:                                        # stored as it is
+                out += level(phys + rel, take)
+            elif kind == 1:                                      # all zeros
+                out += bytes(take)
+            elif kind == 3:                                      # one LZ4 block
+                out += block(i, stop - virt)[rel:rel + take]
+            else:
+                raise UnpackError(f"this game's files are compressed in a way this program doesn't read yet (type {kind})")
+            at += take
+            n -= take
+        return bytes(out)
+    return read, 0
 
 
 def sw_safe_name(raw):
@@ -8017,12 +8070,12 @@ def sw_romfs_tree(rd, base):
 
 
 def sw_nca_files(f, off, hd, h, key, base_rd=None, check=False, stopped=lambda: False):
-    """What one NCA holds that goes into a NUP -> [(folder name, path parts, read, offset inside the section, size)]: a program NCA's exefs and romfs,
-    a data NCA's romfs. Anything else (control, legal, offline html, meta) has no place in a NUP. For an update, `base_rd` reads the game's own romfs section,
-    and `check` also tests each romfs (for an update, the merged one) against the hashes the NCA stores for it."""
-    out = []
+    """What one NCA holds that goes into a NUP -> ([(folder name, path parts, read, offset inside the section, size)], its romfs section as stored or None):
+    a program NCA's exefs and romfs, a data NCA's romfs. Anything else (control, legal, offline html, meta) has no place in a NUP. For an update, `base_rd`
+    reads the game's own romfs section as stored, and `check` also tests each romfs (for an update, the merged one) against the hashes the NCA stores for it."""
+    out, stored = [], None
     if hd["ctype"] not in (0, 4, 5):                                       # program, data, public data (extra content is public data)
-        return out
+        return out, stored
     for idx in range(4):
         start, end = struct.unpack("<II", h[0x240 + 0x10 * idx:0x248 + 0x10 * idx])
         fs = h[0x400 + 0x200 * idx:0x600 + 0x200 * idx]
@@ -8031,7 +8084,7 @@ def sw_nca_files(f, off, hd, h, key, base_rd=None, check=False, stopped=lambda: 
         if fs[2] == 1 and idx == 0 and hd["ctype"] == 0:                  # the exefs (section 2 of a program is its logo, left out)
             rd = sw_sec_reader(f, off, h, idx, key)
             base = sw_pfs0_start(h, idx)
-            if base is None:
+            if base is None or fs[0x188:0x18C] == b"BKTR":
                 raise UnpackError("the game's exefs has a layout this program doesn't know")
             out += [("exefs", p, rd, o, sz) for p, o, sz in sw_pfs0_tree(rd, base)]
         elif fs[2] == 0:                                                 # a romfs
@@ -8042,13 +8095,14 @@ def sw_nca_files(f, off, hd, h, key, base_rd=None, check=False, stopped=lambda: 
             if not 2 <= levels <= 7:
                 raise UnpackError("the game's romfs has a damaged header")
             base = struct.unpack("<Q", ivfc[0x10 + 0x18 * (levels - 2):0x18 + 0x18 * (levels - 2)])[0]
-            rd = sw_sec_reader(f, off, h, idx, key, base_rd)
-            if check and not sw_ivfc_check(rd, fs, stopped):
+            stored = sw_sec_reader(f, off, h, idx, key, base_rd)
+            if check and not sw_ivfc_check(stored, fs, stopped):
                 raise UnpackError("the update and the game's files didn't fit together: the result doesn't match the checksums stored in the update. "
                                   "Is this update for this game (and this version of it)?" if fs[4] == 4 else
                                   "the unpacked files don't match the checksums stored in the game, so the keys or the file may be wrong")
+            rd, base = sw_unpacked_romfs(stored, fs, base)
             out += [("romfs", p, rd, o, sz) for p, o, sz in sw_romfs_tree(rd, base)]
-    return out
+    return out, stored
 
 
 def sw_nup_titles(infos):
@@ -8082,13 +8136,13 @@ def sw_to_nup_folder(infos, keys, dest, prog=None, stopped=lambda: False, check=
                     continue
                 want += 1
                 key = sw_content_key(f, o, hd, h, keys, i["tiks"])
-                files = sw_nca_files(f, o, hd, h, key, base_rd if t["kind"] == "update" else None, check, stopped)
+                files, stored = sw_nca_files(f, o, hd, h, key, base_rd if t["kind"] == "update" else None, check, stopped)
                 if not files:
                     continue
                 got += 1
                 if t["kind"] == "base":
                     root = dest / "base"
-                    base_rd = next((x[2] for x in files if x[0] == "romfs"), None)         # the update's romfs is made from this one
+                    base_rd = stored                         # the update's romfs is made from this one, as stored (before any unpacking of compressed blocks)
                 elif t["kind"] == "update":
                     root = dest / "updates" / str(t["version"])
                 else:
