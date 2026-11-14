@@ -54,7 +54,7 @@ Each file in the list has an **Action** drop-down; it only offers what can work 
 | **Original Xbox: `.xiso.iso`, game folder** | A full dump trimmed to just the game, or its loose files | yes | yes |
 | **PS3: ISO, game folder, split pieces** | Folder to ISO and back; `.iso.0`/`.66600` pieces are joined | yes | yes |
 | **PS3: `.pkg`** | Unpacked to a game folder; a game folder packed into a package | yes | yes |
-| **Switch: NSP, XCI** | Package to cartridge image and back; one NSP per title; bundles with the newest update and DLC | yes | yes |
+| **Switch: NSP, XCI** | Package to cartridge image and back; one NSP per title; bundles with the newest update and DLC; unpacked to a game folder (`exefs` and `romfs`, the newest update merged in, DLC beside it) for emulators and recomps | yes | yes |
 | **Switch / Switch 2: NUP** | Game folder (base, updates, DLC) to NUP and back; an NSP or XCI to NUP (the base game, the newest update merged into it, and DLC; needs your `prod.keys`; files that are the same in the game and its update are stored once). Experimental | yes | yes |
 | **3DS: `.zcci`, `.zcxi`, `.z3dsx`** | Azahar's compressed 3DS files | yes | yes |
 | **3DS: `.3ds`/`.cci`, `.cia`** | Cartridge dump to CIA, and CIA back to a `.3ds`, for decrypted games | yes | yes |
@@ -110,6 +110,7 @@ The program contains **no keys, no firmware, no BIOS files, no games and no decr
 - **Wii discs to RVZ/WIA/WBFS:** your own copy of Dolphin (the program runs its `DolphinTool.exe`) or your own Wii key (a text file in the `keys` folder, or pasted in the setup window).
 - **PlayStation 3 packages (`.pkg`):** point *Settings, Formats, PlayStation 3* at your own `rpcs3.exe`, or paste your own package key.
 - **Switch packages that carry a ticket:** your own `prod.keys` (choose the file or paste it). Games without a ticket, and XCI to NSP, need no keys.
+- **Switch games to a NUP or a game folder:** always your own `prod.keys`, ticket or not, because every Switch game's files are encrypted.
 - **Nintendo 3DS:** nothing is decrypted. A `.3ds` or CIA must already be decrypted, and the program refuses encrypted ones and says so. Nothing from Nintendo, including certificates, is embedded in the files it builds.
 
 The program stores the keys you give it in `chd_manager_settings.json` next to it, so **don't share that file**. It is never part of the release zip.
@@ -183,6 +184,7 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 | Switch 2 folder to NUP (base + update, a 6.5 GB game) | Eglantine, a Switch 2 emulator build | Loaded and played |
 | Switch NSP with a ticket to NUP (four base games, the largest 7.2 GB with 4,678 files) | None: read back and checked only | Unpacked with prod.keys, every file read back against its checksum; the files look right (a GBA ROM header and the exefs `NSO0` mark) |
 | Switch NSP + its update NSP (+ DLC) to NUP (three games: updates of 25 MB, 160 MB and 454 MB; one with two DLC) | None: checked against the hashes stored in the files | The update's patch is merged into the game's files and the result matches every checksum stored in the update; the game's and the DLC's files match theirs; the NUP reads back; an update for the wrong game is refused |
+| Switch NSP to game folder (`exefs` and `romfs`): Metroid Prime Remastered 1.0.0 | PrimeRecomp 0.0.11, a static recompilation that only takes the extracted folder | Its setup recompiled the game from the folder (172 s); the game started, served all 341 `romfs` files, built the 1,016 shaders it ships with and played its intro video at 60 fps |
 | 3DS: `.zcci` made by this program | Azahar | Boots and runs |
 | 3DS: `.cia` made from a decrypted dump | Azahar | Installs and runs (title screen reached) |
 | 3DS: `.3ds` made from that CIA | Azahar | Boots |
@@ -194,13 +196,15 @@ Everything below was run on Windows 11 with chdman 0.289 unless it says otherwis
 - PS3 packages: unpacked results are identical to RPCS3's own on three real games (including seven updates for one game); a package this program packed was installed by RPCS3 and gave back the original folder, with one file differing (an install-order marker in extra content).
 - 3DS: files made by Azahar (a `.zcci` and a `.zcxi`) are read and unpacked correctly; the metadata note this program adds to compressed files matches Azahar's byte for byte on those two files; a CIA made from a decrypted dump matches the layout of a real one.
 - Mode 1 error correction rebuilt on 43,997 real Sega CD sectors: 0 differences.
+- Switch games stored compressed inside the package: Echoes of Wisdom (8.07 GB, with its 1.0.1 update) and Mario Party Jamboree (5.72 GB, with its 1.1.0 update) passed the hash check on every block and unpacked fully; before, they stopped with "the game's romfs is cut short".
+- Switch collections: Super Mario 3D All-Stars with its update came out as four programs, each in its own folder with its own `main.npdm`, every romfs matching its hashes (5.05 GB in 89 s).
 
 **Not tested**
 
 - **A real 3DS.** The CIA it makes is **unsigned and has no certificate chain**. Azahar accepts it; installation and launch on a 3DS running custom firmware have not been verified, and a console on stock firmware will refuse it.
 - **A real Switch, Switch 2 or PS3.** Packed XCI, NUP and PKG files are for emulators, not for real consoles (Sony and Nintendo signatures can't be made).
 - **The PSP "leave out the firmware update" option in PPSSPP or on a PSP.** It was only checked on a made-up image (the original is never changed; the update's files are emptied in a temporary copy). A few PSP games are reported to read that folder, which is why it is off by default.
-- **Switch:** swapping in a newer update was only checked on made-up files; the individual split NSPs were not loaded in an emulator on their own; "newest update only" follows how the patch files work but is not documented authoritatively. The firmware table is from a public wiki.
+- **Switch:** swapping in a newer update was only checked on made-up files; the individual split NSPs were not loaded in an emulator on their own; "newest update only" follows how the patch files work but is not documented authoritatively. The firmware table is from a public wiki. The game folder was only tried from NSPs (not an XCI) and through the command line (the same job code the window runs); a game kept in a sparse layout is refused, and none was at hand to try. Compressed games unpack with the program's own LZ4 code, which is slower than the rest (about 45 MB/s).
 - **VCD** files were only checked by converting back and forth; I could not try one on a PS2 with POPStarter.
 - **Locked buttons** (a click during a conversion can't disturb it) were checked in the program's own code and tests, not by clicking.
 - **NUP** follows a draft specification. A Switch 2 NUP has worked in one emulator; a NUP made from a Switch NSP or XCI has not been loaded in any emulator (an XCI source was not tried either, only NSPs). Other loaders may differ.
