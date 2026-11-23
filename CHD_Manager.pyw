@@ -4281,7 +4281,7 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_single": "→ CUE/BIN, one single BIN", "iso": "→ ISO", "gdi": "→ GDI",
                  "pbp": "→ PlayStation PBP", "cdi": "→ DiscJuggler CDI (experimental)", "vcd": "→ POPStarter VCD (PS1 on PS2)", "cso": "→ CSO (compressed ISO)",
                  "verify": "Verify only", "recompress": "Recompress", "auto": "Extract", "art": "→ Artwork images (PNG)",
-                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "cci": "→ .3ds game image (from a decrypted CIA)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ .xiso.iso (trimmed, smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
+                 "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "cci": "→ .3ds game image (from a decrypted CIA)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ .xiso.iso (trimmed, smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "nup_raw": "→ NUP, uncompressed (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
                  "wux": "→ WUX (compressed Wii U disc)",
@@ -4309,7 +4309,7 @@ def job_target_label(job, key):
 TARGET_NOTE = {"chd": "exact copy", "recompress": "exact copy", "cso": "exact copy", "cso2": "exact copy", "zso": "exact copy", "ecm": "exact copy",
                "rvz": "exact copy", "wia": "exact copy", "gcz": "exact copy", "ciso": "exact copy", "z3ds": "exact copy", "unz3ds": "exact copy",
                "wbfs": "trimmed by default", "zar": "files only", "cia": "repacked", "cci": "repacked", "xci": "repacked", "nsp": "repacked",
-               "split": "repacked", "pkg": "repacked", "nup": "repacked", "god_iso": "repacked"}
+               "split": "repacked", "pkg": "repacked", "nup": "repacked", "nup_raw": "repacked", "god_iso": "repacked"}
 # how the CHD extraction code names each target
 TARGET_FMT = {"cue": "auto", "cue_split": "split", "cue_single": "single", "iso": "iso", "gdi": "auto", "pbp": "pbp",
               "cdi": "cdi", "vcd": "vcd", "cso": "cso", "cso2": "cso2", "zar": "zar", "folder": "folder", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
@@ -4349,7 +4349,7 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 SPACE_RATIO = {"z3ds": 0.8, "chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
                "wbfs": 0.95, "art": 0.0, "n64_check": 0.0, "snes_check": 0.0, "md_check": 0.0, "pce_check": 0.0, "nds_check": 0.0}
 SPACE_EXT = {"xiso": ".xiso.iso", "cia": ".cia", "cci": ".3ds", "z3ds": ".zcci", "unz3ds": ".cci", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
-             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
+             "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "nup_raw": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
              "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud",
              "n64_z64": ".z64", "n64_v64": ".v64", "n64_n64": ".n64", "snes_strip": ".sfc", "snes_add": ".smc", "md_normal": ".md", "md_smd": ".smd", "pce_strip": ".pce", "pce_add": ".pce", "nds_trim": ".nds", "nds_untrim": ".nds", "god_iso": ".iso"}
 
@@ -4527,7 +4527,7 @@ class Job:
         if self.container == "ps3pkg":              # PS3 packages: the game's files, with its updates merged in
             return [("folder", target_label("folder"))]
         if self.container == "swfolder":            # a decrypted Switch game folder: a NUP of it (experimental)
-            return [("nup", target_label("nup"))]
+            return [(k, target_label(k)) for k in ("nup", "nup_raw")]
         if self.container == "nup":                 # a NUP: the folder it holds
             return [("folder", target_label("folder"))]
         if self.container in ("swnsp", "swxci"):    # Switch files: one cartridge image or package of everything, or one package per title
@@ -8529,11 +8529,12 @@ def nup_resolve(pkgs, folder):
     return None
 
 
-def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
+def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3, compress=True):
     """Packages (from nup_bundle, ids from nup_resolve) -> a .nup: the game, its updates, its extra content, each package with its own tree of files.
-    Writes the files first, then the table, then the superblock."""
+    Writes the files first, then the table, then the superblock. compress=False stores every file as it is (codec 0), so a reader can take any part of
+    any file straight from the NUP, with no decompressing from the start of the file; the spec allows a NUP that has only such files."""
     import hashlib
-    z = _zstd()
+    z = _zstd() if compress else None
     allf = []                                                # (package number, path parts, file, size)
     for pi, x in enumerate(pkgs):
         for parts, fp, size in nup_tree(x["root"]):
@@ -8598,14 +8599,14 @@ def build_nup(pkgs, dest, prog=None, stopped=lambda: False, level=3):
             else:
                 metas.append((0, 0))
         total, done = max(1, sum(f[3] for f in allf)), 0
-        cctx = z.ZstdCompressor(level=level)
+        cctx = z.ZstdCompressor(level=level) if compress else None
         for i, (pi, parts, fp, size) in enumerate(allf):
             if size == 0:
                 ext[i] = (0, 0, hashlib.sha256(b"").digest(), 0)
                 continue
             start = out.tell()
             h = hashlib.sha256()
-            raw_only = size > NUP_RAW_OVER                  # big files are stored as they are: Eglantine unpacks big compressed ones into a temp folder it may not have made
+            raw_only = not compress or size > NUP_RAW_OVER                  # big files are stored as they are: Eglantine unpacks big compressed ones into a temp folder it may not have made
             co = None if raw_only else cctx.compressobj(size=size)
             with open(fp, "rb") as f:
                 while True:
@@ -12808,8 +12809,8 @@ class App:
             return self.do_folder_to_pkg(job, o)
         if t == "folder" and job.container == "ps3pkg":
             return self.do_pkg_to_folder(job, o)
-        if t == "nup" and job.container == "swfolder":
-            return self.do_folder_to_nup(job, o)
+        if t in ("nup", "nup_raw") and job.container == "swfolder":
+            return self.do_folder_to_nup(job, o, compress=t == "nup")
         if t == "folder" and job.container == "nup":
             return self.do_nup_to_folder(job, o)
         if t == "xci" and job.container in ("swnsp", "swxci"):
@@ -14048,8 +14049,9 @@ class App:
         if o["delete_src"] and verify:
             self.remove_sources(job, o)
 
-    def do_folder_to_nup(self, job, o):
-        """A decrypted Switch game folder -> a NUP (a community container, zstd compressed, with a checksum for every file). Experimental."""
+    def do_folder_to_nup(self, job, o, compress=True):
+        """A decrypted Switch game folder -> a NUP (a community container, zstd compressed unless compress is False, with a checksum for every file).
+        Experimental."""
         pkgs = nup_bundle(job.path) or []
         err = nup_resolve(pkgs, job.path) if pkgs else "it has nothing in it that can go into a NUP"
         if err:
@@ -14067,12 +14069,12 @@ class App:
             return
         part = out.with_name(out.name + ".part")
         names = " + ".join({0: "game", 1: f"update {x['version']}", 2: "extra content"}[x["kind"]] for x in pkgs)
-        self.post("log", f"\n{job.path.name}  [game folder → NUP: {names}]  (experimental: written from the public draft of the format; not tried in an emulator yet)", "info")
+        self.post("log", f"\n{job.path.name}  [game folder → NUP{'' if compress else ', uncompressed'}: {names}]  (experimental: written from the public draft of the format; not tried in an emulator yet)", "info")
         verify = self.verify_wanted()
         prog = self.cso_progress(job, "Building NUP")
         stop = lambda: self.stop_flag  # noqa: E731
         try:
-            build_nup(pkgs, part, lambda x: prog(x * (0.6 if verify else 1.0)), stop)
+            build_nup(pkgs, part, lambda x: prog(x * (0.6 if verify else 1.0)), stop, compress=compress)
             if verify:
                 self.post("log", "Reading the new NUP back against the folder…", "info")
                 nup_verify(part, pkgs, lambda x: prog(0.6 + x * 0.4), stop)
