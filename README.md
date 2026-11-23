@@ -72,7 +72,7 @@ Each file in the list has an **Action** drop-down; it only offers what can work 
 | **PS3: ISO, game folder, split pieces** | Folder to ISO and back; `.iso.0`/`.66600` pieces are joined | yes | yes |
 | **PS3: `.pkg`** | Unpacked to a game folder; a game folder packed into a package | yes | yes |
 | **Switch: NSP, XCI** | Package to cartridge image and back; one NSP per title; bundles with the newest update and DLC | yes | yes |
-| **Switch 2: NUP** | Game folder (base, updates, DLC) to NUP and back. Experimental | yes | yes |
+| **Switch 2: NUP** | Game folder (base, updates, DLC) to NUP and back; compressed (zstd) or uncompressed, which stores every file as it is so a program can read any part of a file straight from the NUP. Experimental | yes | yes |
 | **3DS: `.zcci`, `.zcxi`, `.z3dsx`** | Azahar's compressed 3DS files | yes | yes |
 | **3DS: `.3ds`/`.cci`, `.cia`** | Cartridge dump to CIA, and CIA back to a `.3ds`, for decrypted games | yes | yes |
 | **N64: `.z64`, `.v64`, `.n64`** | The same ROM in its three byte orders; only reordered, nothing else changes. Also a check of the ROM's header checksums | yes | yes |
