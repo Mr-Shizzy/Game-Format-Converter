@@ -39,7 +39,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "Game Format Converter"
-APP_VER = "2.1.0"
+APP_VER = "2.1.1"
 FROZEN = getattr(sys, "frozen", False)          # True when running as the packaged .exe
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
 SETTINGS_FILE = HERE / "chd_manager_settings.json"
@@ -78,7 +78,7 @@ def scrub_private(text):
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 CD_MAX_BYTES = 737_280_000          # 80-minute CD: 360,000 sectors * 2048 bytes
-SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".nup", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx", ".cia"}
+SRC_EXTS = {".cue", ".gdi", ".toc", ".iso", ".bin", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".mdf", ".nrg", ".ccd", ".img", ".sub", ".m3u", ".cso", ".zso", ".ecm", ".pkg", ".nsp", ".xci", ".nup", ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx", ".cia", ".z64", ".v64", ".n64", ".smc", ".sfc", ".smd", ".pce", ".tg16", ".nds", ".dsi"}
 ARCHIVE_EXTS = {".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"}
 CHDMAN = None                        # path to chdman.exe, set at startup
 
@@ -167,6 +167,8 @@ def fmt_time(sec):
 
 def find_chdman(saved=""):
     for cand in (saved, str(HERE / "chdman.exe"), str(HERE / "chdman")):
+        if os.name != "nt" and cand.lower().endswith(".exe"):
+            continue                       # a Windows program (say, left in a folder shared with Windows) can't work on Linux paths: use the system's chdman
         if cand and Path(cand).is_file():
             return str(Path(cand))
     from shutil import which
@@ -2753,9 +2755,12 @@ def find_dolphintool(configured=""):
     directly inside the usual program folders. Nothing else is searched."""
     cands = [Path(configured)] if configured else []
     cands += [HERE / "DolphinTool.exe", HERE / "Dolphin" / "DolphinTool.exe", HERE / "Dolphin-x64" / "DolphinTool.exe"]
-    w = shutil.which("DolphinTool.exe") or shutil.which("dolphin-tool") or shutil.which("DolphinTool")
+    w = shutil.which("DolphinTool.exe") or shutil.which("dolphin-tool") or shutil.which("dolphin-emu-tool") or shutil.which("DolphinTool")
     if w:
         cands.append(Path(w))
+    if os.name != "nt":                                   # where Linux packages put it (Debian and Ubuntu use /usr/games)
+        cands += [HERE / "dolphin-tool", Path("/usr/games/dolphin-tool"), Path("/usr/bin/dolphin-tool"), Path("/usr/local/bin/dolphin-tool"),
+                  Path("/usr/games/dolphin-emu-tool"), Path("/usr/bin/dolphin-emu-tool")]
     for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
         root = os.environ.get(env)
         base = Path(root) / ("Programs" if env == "LOCALAPPDATA" else "") if root else None
@@ -2765,12 +2770,30 @@ def find_dolphintool(configured=""):
         except OSError:
             pass
     for c in cands:
+        if os.name != "nt" and c.suffix.lower() == ".exe":
+            continue                                      # a Windows program can't work on Linux paths (WSL finds them through the Windows PATH)
         try:
             if c.is_file():
                 return str(c)
         except OSError:
             pass
     return ""
+
+
+def dolphin_tool_beside(p):
+    """The dolphin-tool for a file the user picked (the tool itself, or Dolphin's own program with the tool next to it) -> Path, or None."""
+    p = Path(p)
+    low = p.name.lower()
+    nt = os.name == "nt"
+    tools = ("DolphinTool.exe",) if nt else ("dolphin-tool", "dolphin-emu-tool", "DolphinTool")
+    guis = ("dolphin.exe",) if nt else ("dolphin-emu", "dolphin-emu-qt", "dolphin-emu-nogui", "dolphin")
+    if low in [t.lower() for t in tools]:
+        return p if p.is_file() else None
+    if low in guis:
+        for t in tools:
+            if p.with_name(t).is_file():
+                return p.with_name(t)
+    return None
 
 
 def wii_can(what):
@@ -4249,7 +4272,8 @@ def pbp_game_id(path):
 def target_label(key):
     """Label of a target key, including the per-disc ones ('chd_d2' = CHD of disc 2 only)."""
     base, _, d = key.partition("_d")
-    return TARGET_LABELS.get(base, "") + (f", disc {d} only" if d else "") if key not in TARGET_LABELS else TARGET_LABELS[key]
+    text = TARGET_LABELS.get(base, "") + (f", disc {d} only" if d else "") if key not in TARGET_LABELS else TARGET_LABELS[key]
+    return text + f"  ({TARGET_NOTE[base]})" if text and base in TARGET_NOTE else text
 
 
 # What a row's Action drop-down can offer. 'auto' is for CHDs that hold something else (hard disk, laserdisc, raw).
@@ -4260,7 +4284,32 @@ TARGET_LABELS = {"chd": "→ CHD", "cue": "→ CUE/BIN", "cue_split": "→ CUE/B
                  "cue_fix": "→ CUE/BIN, error correction rebuilt", "zso": "→ ZSO (LZ4 compressed ISO)", "cso2": "→ CSO version 2 (real PSP only)", "zar": "→ ZAR (Xbox 360, for Xenia)", "cia": "→ CIA (decrypted games; emulators and custom firmware)", "cci": "→ .3ds game image (from a decrypted CIA)", "z3ds": "→ Compressed for Azahar (zstd)", "unz3ds": "→ Uncompressed 3DS file", "folder": "→ Game folder (loose files)", "xiso": "→ .xiso.iso (trimmed, smaller, for xemu)", "pkg": "→ PKG (for RPCS3; needs your key)", "nup": "→ NUP (experimental)", "xci": "→ XCI (cartridge image)", "nsp": "→ NSP (package)", "split": "→ Separate NSPs (game, update, each extra content)",
                  "ecm": "→ ECM (error codes removed)", "wbfs": "→ WBFS", "ciso": "→ CISO", "gcz": "→ GCZ",
                  "rvz": "→ RVZ (Dolphin, compressed)", "wia": "→ WIA", "wud": "→ WUD (raw Wii U disc)",
-                 "wux": "→ WUX (compressed Wii U disc)"}
+                 "wux": "→ WUX (compressed Wii U disc)",
+                 "n64_z64": "→ .z64 (big-endian)", "n64_v64": "→ .v64 (byte-swapped)", "n64_n64": "→ .n64 (little-endian)", "n64_check": "Check N64 ROM (checksums only)",
+                 "snes_strip": "→ .sfc (copier header removed)", "snes_add": "→ .smc (copier header added)", "snes_check": "Check SNES ROM (checksum only)",
+                 "nds_check": "Check DS ROM (header and size)", "nds_trim": "→ .nds (trimmed: the padding removed)", "nds_untrim": "→ .nds (full size: padded with 0xFF)",
+                 "pce_strip": "→ .pce (copier header removed)", "pce_add": "→ .pce (copier header added)", "pce_check": "Check PC Engine ROM (structure only)",
+                 "md_normal": "→ .md (normal layout)", "md_smd": "→ .smd (shuffled, with header)", "md_check": "Check Mega Drive ROM (checksum only)",
+                 "god_iso": "→ ISO (Xbox 360 disc image, for Xenia)"}
+PSP_DROP = [False]          # the setting that leaves the firmware UPDATE folder out of PSP images (it makes the result differ from the original)
+
+
+def job_target_label(job, key):
+    """target_label for one row: a PSP image made while the 'leave out the firmware update' option is on is not an exact copy, and the label must not say it is."""
+    text = target_label(key)
+    if (PSP_DROP[0] and job.platform == "PSP" and job.path.suffix.lower() == ".iso" and job.container != "disc"
+            and key.partition("_d")[0] in ("chd", "cso", "cso2", "zso")):
+        text = text.replace("(exact copy)", "(firmware UPDATE folder left out)")
+    return text
+
+
+# How faithful a result is, shown after the target's name in the Action drop-down. Only targets where the answer is the same for every source are listed:
+# 'exact copy' = everything is kept and the original can be rebuilt bit for bit; 'trimmed' = parts of the original are left out; 'repacked' = the game's
+# files are kept but the container is built anew, so it is not the same file a dump would be; 'files only' = just the files, not the disc around them.
+TARGET_NOTE = {"chd": "exact copy", "recompress": "exact copy", "cso": "exact copy", "cso2": "exact copy", "zso": "exact copy", "ecm": "exact copy",
+               "rvz": "exact copy", "wia": "exact copy", "gcz": "exact copy", "ciso": "exact copy", "z3ds": "exact copy", "unz3ds": "exact copy",
+               "wbfs": "trimmed by default", "zar": "files only", "cia": "repacked", "cci": "repacked", "xci": "repacked", "nsp": "repacked",
+               "split": "repacked", "pkg": "repacked", "nup": "repacked", "god_iso": "repacked"}
 # how the CHD extraction code names each target
 TARGET_FMT = {"cue": "auto", "cue_split": "split", "cue_single": "single", "iso": "iso", "gdi": "auto", "pbp": "pbp",
               "cdi": "cdi", "vcd": "vcd", "cso": "cso", "cso2": "cso2", "zar": "zar", "folder": "folder", "auto": "auto", "cue_fix": "fix", "zso": "zso", "ecm": "ecm"}
@@ -4298,10 +4347,11 @@ SPACE_MARGIN = 64 * 1024 ** 2        # file system overhead and a little slack
 # What a target's file is, against the size of the unpacked disc. Compressed targets use a typical figure, not the
 # best case, so a job is only refused when it clearly won't fit. Anything not listed is taken at the full size.
 SPACE_RATIO = {"z3ds": 0.8, "chd": 0.7, "cso": 0.95, "cso2": 0.95, "zar": 0.95, "zso": 0.95, "ecm": 0.95, "pbp": 0.8, "rvz": 0.8, "wia": 0.8, "gcz": 0.8,
-               "wbfs": 0.95, "art": 0.0}
+               "wbfs": 0.95, "art": 0.0, "n64_check": 0.0, "snes_check": 0.0, "md_check": 0.0, "pce_check": 0.0, "nds_check": 0.0}
 SPACE_EXT = {"xiso": ".xiso.iso", "cia": ".cia", "cci": ".3ds", "z3ds": ".zcci", "unz3ds": ".cci", "chd": ".chd", "recompress": ".chd", "cue": ".cue", "cue_split": ".cue", "cue_single": ".cue", "iso": ".iso",
              "gdi": ".gdi", "pbp": ".pbp", "cdi": ".cdi", "vcd": ".vcd", "zar": ".zar", "pkg": ".pkg", "nup": ".nup", "xci": ".xci", "nsp": ".nsp", "cso": ".cso", "cso2": ".cso", "zso": ".zso", "ecm": ".ecm", "rvz": ".rvz",
-             "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud"}
+             "wia": ".wia", "gcz": ".gcz", "ciso": ".ciso", "wbfs": ".wbfs", "wux": ".wux", "wud": ".wud",
+             "n64_z64": ".z64", "n64_v64": ".v64", "n64_n64": ".n64", "snes_strip": ".sfc", "snes_add": ".smc", "md_normal": ".md", "md_smd": ".smd", "pce_strip": ".pce", "pce_add": ".pce", "nds_trim": ".nds", "nds_untrim": ".nds", "god_iso": ".iso"}
 
 
 def chd_logical_size(path):
@@ -4350,6 +4400,13 @@ class Job:
         self.zar_raw = 0               # a ZAR source or an Xbox 360 game folder: bytes of the files in it
         self.z3_cia = False            # a decrypted cartridge dump, which can also become a CIA
         self.z3_raw = 0                # a 3DS file: its size when not compressed
+        self.n64_order = ""            # a Nintendo 64 ROM (container 'n64'): its byte order, 'z64', 'v64' or 'n64'
+        self.n64_head = {}             # ... and its header's title, game code and region
+        self.snes = {}                 # a Super Nintendo ROM (container 'snes'): snes_probe's findings
+        self.md = {}                   # a Mega Drive ROM (container 'md'): md_probe's findings
+        self.pce = {}                  # a PC Engine ROM (container 'pce'): pce_probe's findings
+        self.nds = {}                  # a Nintendo DS ROM (container 'nds'): nds_probe's findings
+        self.god = {}                  # an Xbox 360 Games on Demand package (container 'god'): god_info's findings
         self.xiso_base = 0             # an original Xbox disc dump whose game data starts later in the file (a full Redump-style dump)
         self.xbox = False              # an ISO that is an Xbox 360 disc image
         self.ps3 = False               # a PlayStation 3 disc image (an ISO), or a PS3 game folder (container 'ps3folder')
@@ -4398,6 +4455,8 @@ class Job:
                 return self.z3_raw
             if self.container in ("zar", "xfolder", "ps3folder"):
                 return self.zar_raw + 4 * XISO_MODULUS
+            if self.container == "god":
+                return self.god.get("image") or self.god["payload"] + 16 * 1024 ** 2         # the disc image: the disc's data and the empty stretch before the root directory that the package leaves out
             if self.container == "disc":
                 d = open_disc(p)
                 try:
@@ -4434,6 +4493,28 @@ class Job:
             return [(k, target_label(k)) for k in keys]
         if self.container == "cia3ds":              # a decrypted 3DS game CIA: back to a cartridge image
             return [("cci", target_label("cci"))]
+        if self.container == "god":                 # an Xbox 360 Games on Demand package: the disc image inside it
+            return [("god_iso", target_label("god_iso"))]
+        if self.container == "n64":                 # a Nintendo 64 ROM: the two other byte orders (the one it already has is left out)
+            # the first choice is what a ROM does when nobody picks: a z64 (the order most tools want) is only checked, never copied into another order unasked
+            keys = ["n64_check", "n64_v64", "n64_n64"] if self.n64_order == "z64" else ["n64_z64"] + [k for k in ("n64_v64", "n64_n64") if k[4:] != self.n64_order] + ["n64_check"]
+            return [(k, target_label(k)) for k in keys]
+        if self.container == "snes":                # a Super Nintendo ROM: the copier header taken off (the default), put on, or the checksum checked
+            keys = ["snes_strip", "snes_check"] if self.snes["header"] else ["snes_check", "snes_add"]
+            return [(k, target_label(k)) for k in keys]
+        if self.container == "nds":                 # a DS ROM: only looked at (the default), cut to its used size, or padded to the cartridge's full size
+            n = self.nds
+            keys = ["nds_check"] + (["nds_trim"] if n["trimmed"] and n["size"] > n["trimmed"] else []) + (["nds_untrim"] if n["cap"] and n["size"] < n["cap"] and not n["short"] else [])
+            return [(k, target_label(k)) for k in keys]
+        if self.container == "pce":                 # a PC Engine ROM: the copier header taken off (the default), put on, or only looked at
+            keys = ["pce_strip", "pce_check"] if self.pce["header"] else ["pce_check", "pce_add"]
+            return [(k, target_label(k)) for k in keys]
+        if self.container == "md":                  # a Mega Drive ROM: an .smd made normal (the default), a normal ROM made .smd, or the checksum checked
+            if self.md["layout"] == "smd":
+                keys = ["md_normal", "md_check"]
+            else:
+                keys = ["md_check"] + (["md_smd"] if self.md["size"] % MD_BLOCK == 0 and self.md["size"] <= MD_MAX else [])
+            return [(k, target_label(k)) for k in keys]
         if self.container == "xfolder":
             return [(k, target_label(k)) for k in (("chd", "iso") if self.platform == "Xbox" else ("chd", "iso", "zar"))]
         if self.platform == "Xbox" and self.path.suffix.lower() == ".iso" and self.container != "disc":
@@ -4541,6 +4622,10 @@ class Job:
     def guess_game_id(self):
         """The PlayStation game code ('SLUS01545') when it can be read straight from the file, else ''."""
         ext = self.path.suffix.lower()
+        if self.container == "n64":                    # the 4-character game code in the ROM's header
+            return self.n64_head.get("code", "")
+        if self.container == "nds":
+            return self.nds.get("code", "")
         if self.ps3_info:
             return self.ps3_info.get("id", "")
         if self.pkgs:
@@ -4622,6 +4707,83 @@ class Job:
             what = ("game" if any(x["kind"] == 0 for x in pkgs) else "no game") + (f" + {u} update{'s' if u != 1 else ''}" if u else "") + (f" + {d} extra content" if d else "")
             self.auto_type, self.reason = "DVD", f"Switch game folder, decrypted ({what}; {len(tree)} files)"
             self.warn = nup_resolve(pkgs, p) or ""
+            return
+        if ext == "" and not p.is_dir() and stfs_kind(p) is not None:       # an Xbox 360 Games on Demand package: a header file with no extension, and a .data folder beside it
+            try:
+                self.god = god_info(p)
+            except ValueError as e:
+                raise ValueError(f"this Xbox 360 package can't be used: {e}") from None
+            if self.god is None:
+                self.god = {}
+                raise ValueError(f"this is an Xbox 360 package ({stfs_kind(p)}), not a game disc, so there is nothing to convert")
+            g = self.god
+            try:                                                # the start of the package says how big the image will be, and shows early that it is a game volume at all
+                g["image"] = god_image_size(g)
+            except UnpackError as e:
+                self.god = {}
+                raise ValueError(f"this Xbox 360 package can't be used: {e}") from None
+            except OSError as e:
+                self.god = {}
+                raise ValueError(f"this Xbox 360 package can't be read: {e}") from None
+            self.container, self.platform, self.types = "god", "Xbox 360", ["MODE1"]
+            self.size, self.src_files = g["size"], [p, g["dir"]]
+            self.auto_type = "DVD"
+            self.reason = ("Xbox 360 Games on Demand package" if g["type"] == 0x7000 else "Xbox 360 installed game package") + \
+                (f", {g['name']}" if g["name"] else "") + f" [{g['title_id']}], {len(g['files'])} data file{'s' if len(g['files']) != 1 else ''}"
+            return
+        if ext in N64_EXTS and not p.is_dir():
+            self.n64_head = n64_details(p)
+            self.n64_order, title = self.n64_head["order"], self.n64_head["title"]
+            self.container, self.platform, self.types = "n64", "N64", ["MODE1"]
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.auto_type = "DVD"
+            self.reason = f"Nintendo 64 ROM, {N64_NAMES[self.n64_order]}" + (f", {title}" if title else "") + \
+                (f" [{self.n64_head['code']}{', ' + self.n64_head['region'] if self.n64_head['region'] else ''}]" if self.n64_head["code"] else "")
+            if self.n64_order != "z64":
+                self.reason += "; most emulators and recomps want .z64"
+            return
+        if ext in (".smd", ".md", ".gen", ".bin") and not p.is_dir():
+            try:
+                self.md = md_probe(p)
+            except ValueError:
+                if ext != ".bin":                     # a .bin may well be a CD image, which the code further down handles
+                    raise
+            else:
+                md = self.md
+                self.container, self.platform, self.types = "md", "Mega Drive", ["MODE1"]
+                self.size, self.src_files = p.stat().st_size, [p]
+                self.auto_type = "DVD"
+                self.reason = ("Mega Drive / Genesis ROM, " + ("shuffled .smd with a 512-byte header" if md["layout"] == "smd" else "normal layout") + (f", {md['title']}" if md["title"] else "")
+                               + (f", {md['region']}" if md["region"] else ""))
+                return
+        if ext in NDS_EXTS and not p.is_dir():
+            n = self.nds = nds_probe(p)
+            self.container, self.platform, self.types = "nds", "Nintendo DS", ["MODE1"]
+            self.size, self.src_files = n["size"], [p]
+            self.auto_type = "DVD"
+            state = ("cut short: the file is smaller than the header says" if n["short"] else "size can't be told from its header" if n["trimmed"] is None
+                     else "trimmed" if n["size"] == n["trimmed"] else "has padding after the ROM" if n["size"] > n["trimmed"] else "trimmed")
+            self.reason = (f"Nintendo DS ROM, {n['kind']}" + (f", {n['title']}" if n["title"] else "") + (f" [{n['code']}{', ' + n['region'] if n['region'] else ''}]" if n["code"] else "")
+                           + f", {fmt_size(n['cap'])} cartridge, {state}" if n["cap"] else f"Nintendo DS ROM, {n['kind']}, {state}")
+            if n["kind"] != "DS" and n["trimmed"] is None and not n["short"]:
+                self.warn = "this DSi game's header doesn't say where its DSi part ends, so it can't be safely trimmed (it can still be padded to full size)"
+            return
+        if ext in PCE_EXTS and not p.is_dir():
+            self.pce = pce_probe(p)
+            self.container, self.platform, self.types = "pce", "PC Engine", ["MODE1"]
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.auto_type = "DVD"
+            self.reason = (f"PC Engine / TurboGrafx-16 ROM, {fmt_size(self.pce['size'] - self.pce['header'])}"
+                           + (", with a 512-byte copier header" if self.pce["header"] else ", no copier header"))
+            return
+        if ext in SNES_EXTS and not p.is_dir():
+            self.snes = snes_probe(p)
+            self.container, self.platform, self.types = "snes", "SNES", ["MODE1"]
+            self.size, self.src_files = p.stat().st_size, [p]
+            self.auto_type = "DVD"
+            sn = self.snes
+            self.reason = (f"Super Nintendo ROM, {sn['mapping']}" + (f", {sn['title']}" if sn["title"] else "") + (f", {sn['region']}" if sn["region"] else "")
+                           + (", with a 512-byte copier header" if sn["header"] else ", no copier header"))
             return
         if ext == ".cia" and not p.is_dir():
             parts = cia_parts(p)
@@ -4837,10 +4999,12 @@ class Job:
             self.status = "Missing: " + ", ".join(self.missing[:2])
 
     def action_label(self):
-        text = self.action_text or target_label(self.target or "")
+        text = self.action_text or job_target_label(self, self.target or "")
         return text + "  ▾" if self.can_pick and not self.status.startswith("Done") else text
 
     def type_label(self):
+        if self.container in ("n64", "snes", "nds", "pce", "md"):          # a cartridge ROM is neither a CD nor a DVD (the guess below is only for discs)
+            return "ROM"
         if self.kind == "convert":
             return self.type + ("*" if self.override != "Auto" else "")
         return self.disc or self.type
@@ -5239,6 +5403,596 @@ def xiso_files(path, root_only=False):
                     stack.append(right * 4)
         walk(root_sector, root_size, (), 0)
         return base, out
+
+
+# ---- Nintendo 64: the same ROM comes in three byte orders. .z64 is big-endian (the order the console reads it; most emulators and recompilation projects
+# want this one), .v64 has every pair of bytes swapped (the old Doctor V64 backup unit), and .n64 is little-endian (every group of four bytes reversed).
+# Nothing is added or removed, only reordered, so the change is exact and undone by converting back. The order is found from the first bytes
+# (the ROM header starts 80 37 12 40 in big-endian), not from the file's name, because files with the wrong extension are common.
+N64_EXTS = (".z64", ".v64", ".n64")
+N64_NAMES = {"z64": "big-endian (.z64)", "v64": "byte-swapped (.v64)", "n64": "little-endian (.n64)"}
+N64_CHUNK = 4 * 1024 * 1024                      # a multiple of 4, so no group of bytes is ever cut between two reads
+
+
+def n64_order(head, ext=""):
+    """'z64', 'v64' or 'n64' from the first four bytes of a ROM, or None when it doesn't look like an N64 ROM."""
+    b = bytes(head[:4])
+    if len(b) < 4:
+        return None
+    if b[0] == 0x80 and b[1] == 0x37:
+        return "z64"
+    if b[0] == 0x37 and b[1] == 0x80:
+        return "v64"
+    if b[2] == 0x37 and b[3] == 0x80:
+        return "n64"
+    # an unusual header (some homebrew and early builds): the name's hint is believed only when the 0x80 marker is where that order puts it
+    # and the title area (bytes 0x20 to 0x33 once in big-endian order) reads as text, so a stray file with the right name and a lucky first byte isn't taken
+    for e, o, at in ((".z64", "z64", 0), (".v64", "v64", 1), (".n64", "n64", 3)):
+        if ext == e and b[at] == 0x80 and len(head) >= 0x40:
+            t = n64_swap(bytes(head[:0x40]), o, "z64")[0x20:0x34]
+            if sum(1 for c in t if 32 <= c < 127 or c == 0) >= 18:
+                return o
+    return None
+
+
+def n64_swap(data, src, dst):
+    """The bytes of a chunk (a multiple of 4 long) rewritten from byte order `src` to `dst`."""
+    if src == dst:
+        return bytes(data)
+    d = bytes(data)
+    if src != "z64":                             # to big-endian first: both swaps undo themselves
+        d = _n64_flip(d, src)
+    return _n64_flip(d, dst) if dst != "z64" else d
+
+
+def _n64_flip(d, order):
+    out = bytearray(len(d))
+    if order == "v64":                           # every pair of bytes swapped
+        out[0::2], out[1::2] = d[1::2], d[0::2]
+    else:                                        # n64: every group of four reversed
+        out[0::4], out[1::4], out[2::4], out[3::4] = d[3::4], d[2::4], d[1::4], d[0::4]
+    return bytes(out)
+
+
+N64_REGIONS = {"E": "USA", "J": "Japan", "P": "Europe", "U": "Australia", "D": "Germany", "F": "France", "I": "Italy", "S": "Spain", "A": "Asia", "B": "Brazil",
+               "N": "Canada"}
+
+
+def n64_details(path):
+    """{'order', 'title', 'code', 'region'} of an N64 ROM file (the title is the ROM's own 20-character name, the code its 4-character game code).
+    Raises ValueError with a plain sentence when it isn't a ROM that can be converted."""
+    path = Path(path)
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        head = f.read(0x40)
+    order = n64_order(head, path.suffix.lower())
+    if size < 0x1000 or order is None:
+        raise ValueError("this doesn't look like a Nintendo 64 ROM (a ROM starts with a header the program recognises). "
+                         "If it is one, it may be an unusual build; the file is left alone")
+    if size % 4:
+        raise ValueError(f"this ROM's size ({size} bytes) isn't a multiple of 4, so its bytes can't be reordered safely. It is probably cut short")
+    z = n64_swap(head[:0x40 - 0x40 % 4], order, "z64")
+    title = z[0x20:0x34].decode("ascii", "replace").replace("\0", " ").strip()
+    code = z[0x3B:0x3F].decode("ascii", "replace")
+    return {"order": order, "title": title if title and "\ufffd" not in title else "",
+            "code": code if len(code) == 4 and code.isascii() and code.isalnum() else "", "region": N64_REGIONS.get(code[3:4], "") if code.isascii() else ""}
+
+
+def n64_info(path):
+    """(order, title) of an N64 ROM file. Raises ValueError with a plain sentence when it isn't one that can be converted."""
+    d = n64_details(path)
+    return d["order"], d["title"]
+
+
+# The two checksums in the header (CRC1 at 0x10, CRC2 at 0x14) are worked out from the first megabyte after the boot code, in one of four ways that depend on the
+# boot chip the cartridge was made for. A good dump gives back what the header says. A hack or translation that wasn't re-signed, or a damaged file, doesn't.
+N64_CRC_SEEDS = (("6102", 0xF8CA4DDC), ("6103", 0xA3886759), ("6105", 0xDF26F436), ("6106", 0x1FEA617A))
+N64_CRC_START, N64_CRC_LEN = 0x1000, 0x100000
+
+
+def n64_crc_check(path, order):
+    """-> ('match', boot chip) | ('mismatch', None) | ('short', None) for the header checksums of an N64 ROM that is in byte order `order`."""
+    with open(path, "rb") as f:
+        raw = f.read(N64_CRC_START + N64_CRC_LEN)
+    if len(raw) < N64_CRC_START + N64_CRC_LEN:
+        return "short", None
+    z = n64_swap(raw, order, "z64")
+    want = struct.unpack(">II", z[0x10:0x18])
+    words = struct.unpack(">%dI" % (N64_CRC_LEN // 4), z[N64_CRC_START:])
+    boot = struct.unpack(">64I", z[0x40 + 0x710:0x40 + 0x710 + 256])     # 6105 mixes in 64 words from the boot code
+    for chip, seed in N64_CRC_SEEDS:
+        t1 = t2 = t3 = t4 = t5 = t6 = seed
+        for k, d in enumerate(words):
+            t6n = t6 + d
+            if t6n > 0xFFFFFFFF:
+                t4 = (t4 + 1) & 0xFFFFFFFF
+            t6 = t6n & 0xFFFFFFFF
+            t3 ^= d
+            n = d & 31
+            r = ((d << n) | (d >> (32 - n))) & 0xFFFFFFFF if n else d
+            t5 = (t5 + r) & 0xFFFFFFFF
+            t2 = (t2 ^ r) if t2 > d else (t2 ^ t6 ^ d)
+            t1 = (t1 + ((boot[k & 63] ^ d) if chip == "6105" else (t5 ^ d))) & 0xFFFFFFFF
+        if chip == "6103":
+            got = (((t6 ^ t4) + t3) & 0xFFFFFFFF, ((t5 ^ t2) + t1) & 0xFFFFFFFF)
+        elif chip == "6106":
+            got = (((t6 * t4) + t3) & 0xFFFFFFFF, ((t5 * t2) + t1) & 0xFFFFFFFF)
+        else:
+            got = (t6 ^ t4 ^ t3, t5 ^ t2 ^ t1)
+        if got == want:
+            return "match", chip
+    return "mismatch", None
+
+
+def n64_convert(src, dst, src_order, dst_order, prog=None, stopped=lambda: False):
+    """Write the ROM at `src` into `dst` in another byte order."""
+    total = max(1, Path(src).stat().st_size)
+    done = 0
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            chunk = a.read(N64_CHUNK)
+            if not chunk:
+                break
+            b.write(n64_swap(chunk, src_order, dst_order))
+            done += len(chunk)
+            if prog:
+                prog(done / total)
+
+
+def n64_matches(src, dst, src_order, dst_order, prog=None, stopped=lambda: False):
+    """True when `dst`, put back into the order of `src`, is the same bytes as `src`."""
+    total = max(1, Path(src).stat().st_size)
+    done = 0
+    with open(src, "rb") as a, open(dst, "rb") as b:
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            x, y = a.read(N64_CHUNK), b.read(N64_CHUNK)
+            if x != n64_swap(y, dst_order, src_order):
+                return False
+            if not x:
+                return True
+            done += len(x)
+            if prog:
+                prog(done / total)
+
+
+# ---- Super Nintendo: the copier header. Old backup devices put 512 extra bytes in front of the ROM (.smc usually has them, .sfc usually doesn't). Most emulators
+# accept both; many tools, patches and databases want the ROM without it. A ROM with the header is recognised the way everything recognises it: its size is 512 bytes
+# past a multiple of 1024. The ROM's own header (title, memory map, region and a checksum pair) is read from where LoROM, HiROM and ExHiROM keep it, to be sure
+# the file really is a SNES ROM before anything is changed.
+SNES_EXTS = (".smc", ".sfc", ".swc", ".fig")
+SNES_HEAD = 512
+SNES_REGIONS = {0: "Japan", 1: "USA", 2: "Europe", 3: "Sweden", 4: "Finland", 5: "Denmark", 6: "France", 7: "Netherlands", 8: "Spain", 9: "Germany",
+                10: "Italy", 11: "China", 13: "Korea", 15: "Canada", 16: "Brazil", 17: "Australia"}
+
+
+def _snes_score(h):
+    """How much 64 bytes look like a SNES ROM header (0 to 5)."""
+    title = h[:21]
+    shown = sum(1 for c in title if 32 <= c < 127 or 0xA1 <= c <= 0xDF)                         # letters, or Japanese half-width katakana (Shift-JIS)
+    text = shown >= 3 and shown + title.count(0) >= 19                                         # the rest may be zeros: some ROMs pad with them, not spaces
+    mode = h[0x15]
+    plausible = (mode & 0xE0) == 0x20 and (mode & 0x0F) in (0, 1, 2, 3, 5, 10)
+    comp, csum = struct.unpack("<HH", h[0x1C:0x20])
+    valid = comp ^ csum == 0xFFFF
+    reset = struct.unpack("<H", h[0x3C:0x3E])[0]
+    size_ok = 7 <= h[0x17] <= 13                    # the header's ROM size, as a power of two of kilobytes (128 KB to 8 MB)
+    return 2 * valid + text + plausible + (reset >= 0x8000), text and plausible and (valid or size_ok)
+
+
+def snes_probe(path):
+    """{'header': 0 or 512, 'title', 'mapping', 'region', 'size'} of a SNES ROM file. Raises ValueError with a plain sentence when it isn't one."""
+    path = Path(path)
+    size = path.stat().st_size
+    best = None
+    with open(path, "rb") as f:
+        for hl in ((SNES_HEAD, 0) if size % 1024 == SNES_HEAD else (0,)):          # a size 512 bytes past a multiple of 1024 means a header, unless the ROM's own header says otherwise
+            for off, name in ((0x7FC0, "LoROM"), (0xFFC0, "HiROM"), (0x40FFC0, "ExHiROM")):
+                if hl + off + 64 > size:
+                    continue
+                f.seek(hl + off)
+                h = f.read(64)
+                score, sane = _snes_score(h)
+                if score >= 3 and sane and (best is None or score > best[0]):
+                    best = (score, name, h, hl)
+            if best:
+                break
+    if best is None:
+        raise ValueError("this doesn't look like a Super Nintendo ROM (its header, which a SNES ROM has near the middle of the first banks, wasn't found). "
+                         "The file is left alone")
+    h, hl = best[2], best[3]
+    raw = bytes(32 if c == 0 else c for c in h[:21])
+    try:
+        title = raw.decode("cp932").strip()                  # Japanese titles are Shift-JIS (half-width katakana)
+        if not title.isprintable():
+            raise ValueError
+    except (UnicodeDecodeError, ValueError):
+        title = bytes(c if 32 <= c < 127 else 32 for c in raw).decode("ascii").strip()
+    return {"header": hl, "title": title, "mapping": best[1], "region": SNES_REGIONS.get(h[0x19], ""), "size": size,
+            "sum": struct.unpack("<H", h[0x1E:0x20])[0]}
+
+
+def snes_checksum_check(path, info):
+    """-> 'match' | 'mismatch' | 'unsure' for the checksum in the ROM's own header (the sum of all the ROM's bytes, counting a leftover part again until it
+    fills the next power of two). 'unsure' is for sizes where that rule can't be applied with certainty and the sum doesn't match."""
+    total = info["size"] - info["header"]
+    p = 1 << (total.bit_length() - 1)
+    rem = total - p
+    s1 = s2 = 0
+    with open(path, "rb") as f:
+        f.seek(info["header"])
+        left = p
+        while left > 0:
+            b = f.read(min(left, 1 << 22))
+            if not b:
+                break
+            s1 += sum(b)
+            left -= len(b)
+        left = rem
+        while left > 0:
+            b = f.read(min(left, 1 << 22))
+            if not b:
+                break
+            s2 += sum(b)
+            left -= len(b)
+    if rem and p % rem == 0:
+        got = (s1 + s2 * (p // rem)) & 0xFFFF
+    else:
+        got = (s1 + s2) & 0xFFFF
+    if got == info["sum"]:
+        return "match"
+    return "mismatch" if rem == 0 else "unsure"
+
+
+def copy_range(src, src_off, dst, head=b"", prog=None, stopped=lambda: False):
+    """Write `head`, then everything in `src` from `src_off` on, into `dst`."""
+    total = max(1, Path(src).stat().st_size - src_off)
+    done = 0
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        b.write(head)
+        a.seek(src_off)
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            chunk = a.read(1 << 22)
+            if not chunk:
+                break
+            b.write(chunk)
+            done += len(chunk)
+            if prog:
+                prog(done / total)
+
+
+def same_from(a_path, a_off, b_path, b_off, prog=None, stopped=lambda: False):
+    """True when `a_path` from `a_off` and `b_path` from `b_off` hold exactly the same bytes to the end."""
+    total = max(1, Path(a_path).stat().st_size - a_off)
+    done = 0
+    with open(a_path, "rb") as a, open(b_path, "rb") as b:
+        a.seek(a_off)
+        b.seek(b_off)
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            x, y = a.read(1 << 22), b.read(1 << 22)
+            if x != y:
+                return False
+            if not x:
+                return True
+            done += len(x)
+            if prog:
+                prog(done / total)
+
+
+def snes_new_header(size):
+    """A plain 512-byte copier header: the ROM's size in 8 KB blocks, then zeros. (Old devices wanted more fields; modern tools only look at the size.)"""
+    return struct.pack("<H", min(size // 8192, 0xFFFF)) + bytes(SNES_HEAD - 2)
+
+
+# ---- Mega Drive / Genesis: the same cartridge comes as a normal ROM (.md, .bin, .gen: what the console reads) or as the Super Magic Drive copier's .smd, which is a
+# 512-byte header followed by 16 KB blocks whose bytes are shuffled (the odd-numbered bytes of the block first, then the even-numbered ones). A normal ROM has 'SEGA' at
+# 0x100; an .smd shows it there only once a block is un-shuffled. Nothing is added or removed apart from that header, so the change is exact in both directions
+# (a .smd is whole blocks, so a ROM that isn't a whole number of 16 KB blocks can't be turned into one without adding bytes, and the program says so).
+MD_BLOCK = 16384
+MD_HEAD = 512
+MD_MAX = 4 * 1024 * 1024                          # the .smd header counts blocks in one byte: 4 MB is the most it can describe
+MD_REGIONS = {"J": "Japan", "U": "USA", "E": "Europe"}
+
+
+def md_unshuffle(block):
+    out = bytearray(len(block))
+    half = len(block) // 2
+    out[1::2], out[0::2] = block[:half], block[half:]
+    return bytes(out)
+
+
+def md_shuffle(block):
+    out = bytearray(len(block))
+    half = len(block) // 2
+    out[:half], out[half:] = block[1::2], block[0::2]
+    return bytes(out)
+
+
+def is_snes_rom(path):
+    """True when the file is a Super Nintendo ROM (by its contents; .swc and .fig also name other kinds of file)."""
+    try:
+        snes_probe(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def md_probe(path):
+    """{'layout': 'normal' or 'smd', 'header', 'title', 'region', 'size'} of a Mega Drive ROM file. Raises ValueError with a plain sentence when it isn't one."""
+    path = Path(path)
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        head = f.read(MD_HEAD + MD_BLOCK)
+    not_rom = ValueError("this doesn't look like a Mega Drive / Genesis ROM (a ROM has 'SEGA' in its header, and this doesn't; a file over 8 MB isn't taken for one either). "
+                         "The file is left alone")
+    if size < 0x200 or size > 8 * 1024 * 1024 or head[:14] in (b"SEGADISCSYSTEM", b"SEGABOOTDISC  "):    # a Sega CD disc image is not a cartridge
+        raise not_rom
+    if b"SEGA" in head[0x100:0x108]:
+        layout, hdr, data = "normal", 0, head
+    elif size % MD_BLOCK == MD_HEAD and len(head) >= MD_HEAD + MD_BLOCK and b"SEGA" in md_unshuffle(head[MD_HEAD:MD_HEAD + MD_BLOCK])[0x100:0x108]:
+        layout, hdr, data = "smd", MD_HEAD, bytes(md_unshuffle(head[MD_HEAD:MD_HEAD + MD_BLOCK]))
+        if head[2] & 0x40:
+            raise ValueError("this is one piece of a split .smd ROM (the next pieces are other files), so it can't be converted on its own")
+    else:
+        raise not_rom
+    clean = lambda b: " ".join(bytes(c if 32 <= c < 127 else 32 for c in b).decode("ascii").split())    # noqa: E731
+    title = clean(data[0x150:0x180]) or clean(data[0x120:0x150])
+    region = ", ".join(MD_REGIONS[chr(c)] for c in data[0x1F0:0x1F3] if chr(c) in MD_REGIONS)
+    return {"layout": layout, "header": hdr, "title": title, "region": region, "size": size}
+
+
+def is_md_rom(path):
+    """True when the file is a Mega Drive ROM (found by its contents; .md and .gen are also used for other things)."""
+    try:
+        md_probe(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def md_normal_bytes(path, info):
+    """The whole ROM in the normal layout, in memory (a Mega Drive ROM is at most a few megabytes)."""
+    with open(path, "rb") as f:
+        f.seek(info["header"])
+        data = f.read()
+    if info["layout"] == "normal":
+        return data
+    if len(data) % MD_BLOCK:
+        raise ValueError("this .smd file is cut short (its data isn't a whole number of 16 KB blocks)")
+    return b"".join(md_unshuffle(data[i:i + MD_BLOCK]) for i in range(0, len(data), MD_BLOCK))
+
+
+def md_checksum_check(path, info):
+    """-> 'match' | 'mismatch' | 'unsure' for the checksum in the ROM's header (the sum of all 16-bit words from 0x200 to the ROM's end)."""
+    rom = md_normal_bytes(path, info)
+    want = struct.unpack(">H", rom[0x18E:0x190])[0]
+    end = struct.unpack(">I", rom[0x1A4:0x1A8])[0] + 1
+    if not 0x200 < end <= len(rom) + 1:
+        return "unsure"
+    body = rom[0x200:end]
+    if len(body) % 2:
+        body += b"\0"
+    return "match" if sum(struct.unpack(">%dH" % (len(body) // 2), body)) & 0xFFFF == want else "mismatch"
+
+
+def md_smd_header(size):
+    h = bytearray(MD_HEAD)
+    h[0], h[1], h[8], h[9], h[10] = (size // MD_BLOCK) & 0xFF, 0x03, 0xAA, 0xBB, 0x06
+    return bytes(h)
+
+
+def md_convert(src, dst, to_smd, header, prog=None, stopped=lambda: False):
+    """A normal ROM -> .smd (to_smd) or an .smd -> a normal ROM. `header` is how many bytes of `src` come before its blocks."""
+    total = max(1, Path(src).stat().st_size - header)
+    done = 0
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        a.seek(header)
+        if to_smd:
+            b.write(md_smd_header(Path(src).stat().st_size))
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            blk = a.read(MD_BLOCK)
+            if not blk:
+                break
+            if len(blk) != MD_BLOCK:
+                raise UnpackError("the ROM isn't a whole number of 16 KB blocks, so its bytes can't be shuffled safely")
+            b.write(md_shuffle(blk) if to_smd else md_unshuffle(blk))
+            done += len(blk)
+            if prog:
+                prog(done / total)
+
+
+def md_matches(normal_path, normal_head, smd_path, prog=None, stopped=lambda: False):
+    """True when the .smd's blocks, un-shuffled, are exactly the normal ROM."""
+    total = max(1, Path(normal_path).stat().st_size - normal_head)
+    done = 0
+    with open(normal_path, "rb") as a, open(smd_path, "rb") as b:
+        a.seek(normal_head)
+        b.seek(MD_HEAD)
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            x, y = a.read(MD_BLOCK), b.read(MD_BLOCK)
+            if x != md_unshuffle(y) if y else bool(x):
+                return False
+            if not x:
+                return True
+            done += len(x)
+            if prog:
+                prog(done / total)
+
+
+# ---- PC Engine / TurboGrafx-16: the copier header. Backup devices put 512 extra bytes in front of a HuCard ROM. A ROM is a whole number of 8 KB banks, so a size
+# 512 bytes past a multiple of 8192 means a header. Unlike a SNES or Mega Drive ROM, a PC Engine ROM has no title, checksum or marker to check, so the file is
+# recognised by what the CPU needs: the vectors at the end of the first bank (the reset vector, where it starts running, must point into the top 8 KB of memory).
+PCE_EXTS = (".pce", ".tg16", ".sgx")
+PCE_HEAD = 512
+PCE_BANK = 8192
+
+
+def pce_probe(path):
+    """{'header': 0 or 512, 'size', 'reset'} of a PC Engine ROM file. Raises ValueError with a plain sentence when it isn't one."""
+    path = Path(path)
+    size = path.stat().st_size
+    hl = PCE_HEAD if size % PCE_BANK == PCE_HEAD else 0
+    if (size - hl) % PCE_BANK or size - hl < PCE_BANK:
+        raise ValueError(f"this doesn't look like a PC Engine / TurboGrafx-16 ROM: its size ({size} bytes) isn't a whole number of 8 KB banks (with or without a 512-byte header). "
+                         "The file is left alone")
+    with open(path, "rb") as f:
+        f.seek(hl + PCE_BANK - 10)
+        v = struct.unpack("<5H", f.read(10))               # IRQ2, IRQ1, timer, NMI, reset
+        f.seek(hl + (v[4] & 0x1FFF))
+        first = f.read(1)                                  # the first instruction of the start-up code
+    # Checked against 104 real ROMs: the reset vector is in the top 8 KB in all of them; most also have the other four vectors there, and a few point them lower
+    # in memory but start up with SEI (0x78, "disable interrupts"), as 98 of the 104 do; the other six all have the other four vectors in the top bank.
+    if v[4] < 0xE000 or not (sum(1 for x in v if x >= 0xE000) >= 4 or first == b"\x78"):
+        raise ValueError("this doesn't look like a PC Engine / TurboGrafx-16 ROM (the start-up vectors at the end of its first bank aren't where a ROM keeps them). "
+                         "Some US TurboGrafx-16 dumps are bit-swapped, which this program doesn't undo. The file is left alone")
+    return {"header": hl, "size": size, "reset": v[4]}
+
+
+def is_pce_rom(path):
+    """True when the file is a PC Engine ROM (by its contents; .sgx also names other kinds of file)."""
+    try:
+        pce_probe(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+# ---- Nintendo DS (and DSi-enhanced) cartridge ROMs: trimmed or full size. A cartridge holds a power-of-two amount of memory (the "capacity", byte 0x14 of the header),
+# but a game only uses part of it, and a dump can be cut after the used part ("trimmed") or keep the empty rest ("full size", padded with 0xFF). The header says where
+# the used part ends: at 0x80 for a DS game; for a DSi-enhanced one the DSi section comes after it and ends where the DSi digest area ends (0x1E8 + 0x1EC), so a DSi game
+# cut at 0x80 would lose its DSi half. Some games carry a 136-byte signature right after that end, which the header's size doesn't count; it is kept. Nothing is ever
+# cut unless everything after the end is padding (all 0xFF or all 0x00), because a few games keep data there.
+NDS_EXTS = (".nds", ".dsi")
+NDS_SIG = 136
+NDS_REGIONS = {"J": "Japan", "E": "USA", "P": "Europe", "D": "Germany", "F": "France", "I": "Italy", "S": "Spain", "H": "Netherlands", "K": "Korea", "U": "Australia",
+               "C": "China", "A": "Asia", "O": "International"}
+
+
+def _nds_crc16(data):
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def nds_probe(path):
+    """What the header of a DS / DSi ROM says -> a dict. Raises ValueError with a plain sentence when the file isn't a DS ROM."""
+    path = Path(path)
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        h = f.read(0x220)
+        if len(h) < 0x200:
+            raise ValueError("this doesn't look like a Nintendo DS ROM (it is too small to have a header). The file is left alone")
+        h = h.ljust(0x220, b"\0")
+        # the Nintendo logo (156 bytes at 0xC0) always has the checksum 0xCF56, and the header stores it at 0x15C: both must be there, so a stray file isn't taken for a ROM
+        if len(h) < 0x200 or struct.unpack("<H", h[0x15C:0x15E])[0] != 0xCF56 or _nds_crc16(h[0xC0:0x15C]) != 0xCF56:
+            raise ValueError("this doesn't look like a Nintendo DS ROM (the header's logo checksum isn't there). The file is left alone")
+        u32 = lambda o: struct.unpack("<I", h[o:o + 4])[0]               # noqa: E731
+        unit, used = h[0x12], u32(0x80)
+        cap = 0x20000 << h[0x14] if h[0x14] <= 15 else 0
+        end = used
+        if unit & 2:                                                        # 2 = DS game with DSi extras, 3 = DSi only
+            # The DSi part ends where its digest area ends. The header's own "total size" field (0x210) is only filled in on some games (on 3 of the 5 DSi games tried it
+            # was 0, 0xFFFFFFFF or a small number), so it is used as a cross-check, never as the answer.
+            off, sz = u32(0x1E8), u32(0x1EC)
+            end = off + sz if off and sz and off + sz >= used else None
+            if end is not None and end < max(u32(0x1C0) + u32(0x1CC), u32(0x1D0) + u32(0x1DC)):      # the end can't be before the DSi code it is meant to hold
+                end = None
+            total = u32(0x210)
+            if end is not None and used <= total <= max(size, cap) and total != end:                  # the header contradicts itself: don't guess
+                end = None
+        trimmed = cert = None
+        if end is not None and 0x200 <= end <= max(size, cap) and size >= end:
+            trimmed = end
+            if size >= end + NDS_SIG:
+                f.seek(end)
+                sig = f.read(NDS_SIG)
+                if any(c not in (0, 255) for c in sig):                       # a real signature, not padding
+                    trimmed, cert = end + NDS_SIG, sig[:2] == b"ac"            # a DS game's Download Play certificate starts with "ac"
+    code = h[0x0C:0x10].decode("ascii", "replace")
+    title = " ".join(bytes(c if 32 <= c < 127 else 32 for c in h[:12]).decode("ascii").split())
+    return {"size": size, "unit": unit, "kind": {0: "DS", 2: "DSi-enhanced", 3: "DSi exclusive"}.get(unit, "DS"), "cap": cap, "used": used, "end": end,
+            "trimmed": trimmed, "cert": cert, "short": end is not None and size < end, "title": title, "code": code if code.isascii() and code.isalnum() else "",
+            "region": NDS_REGIONS.get(code[3:4], "") if code.isascii() else "", "header_ok": _nds_crc16(h[:0x15E]) == struct.unpack("<H", h[0x15E:0x160])[0]}
+
+
+def is_nds_rom(path):
+    try:
+        nds_probe(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def nds_tail_is_padding(path, start, stopped=lambda: False):
+    """True when the file from `start` on holds nothing but padding: bytes that are 0xFF or 0x00 (a dump can have a stretch of each; real data has other values)."""
+    with open(path, "rb") as f:
+        f.seek(start)
+        while True:
+            if stopped():
+                raise UnpackError("stopped")
+            blk = f.read(1 << 22)
+            if not blk:
+                return True
+            if blk.count(0) + blk.count(255) != len(blk):
+                return False
+
+
+def nds_copy(src, dst, keep, pad_to=0, prog=None, stopped=lambda: False):
+    """Write the first `keep` bytes of `src` into `dst`, then 0xFF up to `pad_to` bytes."""
+    total = max(keep, pad_to, 1)
+    done = 0
+    with open(src, "rb") as a, open(dst, "wb") as b:
+        left = keep
+        while left > 0:
+            if stopped():
+                raise UnpackError("stopped")
+            blk = a.read(min(left, 1 << 22))
+            if not blk:
+                break
+            b.write(blk)
+            left -= len(blk)
+            done += len(blk)
+            if prog:
+                prog(done / total)
+        pos = done
+        while pos < pad_to:
+            if stopped():
+                raise UnpackError("stopped")
+            n = min(pad_to - pos, 1 << 22)
+            b.write(b"\xff" * n)
+            pos += n
+            if prog:
+                prog(pos / total)
+
+
+def same_prefix(a_path, b_path, n, prog=None, stopped=lambda: False):
+    """True when the first `n` bytes of the two files are the same (and both have at least that many)."""
+    done = 0
+    with open(a_path, "rb") as a, open(b_path, "rb") as b:
+        while done < n:
+            if stopped():
+                raise UnpackError("stopped")
+            x, y = a.read(min(1 << 22, n - done)), b.read(min(1 << 22, n - done))
+            if x != y or not x:
+                return False
+            done += len(x)
+            if prog:
+                prog(done / max(n, 1))
+    return True
 
 
 # ---- Nintendo 3DS: Azahar's compressed files (.zcci, .zcxi, .z3dsx). A 32-byte header, a small block of notes, then the plain file cut into
@@ -5785,8 +6539,8 @@ def copy_zeroing(src, dest, ranges, prog, stopped):
             prog(pos / max(1, size))
 
 
-def stfs_kind(path):
-    """None unless the file is an Xbox 360 package (STFS: starts with LIVE, PIRS or CON); then a short description of what kind."""
+def stfs_type(path):
+    """None unless the file is an Xbox 360 package (STFS: starts with LIVE, PIRS or CON); then its content type number."""
     try:
         with open(path, "rb") as f:
             head = f.read(0x348)
@@ -5794,7 +6548,273 @@ def stfs_kind(path):
         return None
     if len(head) < 0x348 or head[:4] not in (b"LIVE", b"PIRS", b"CON "):
         return None
-    return STFS_TYPES.get(struct.unpack(">I", head[0x344:0x348])[0], "a downloadable package")
+    return struct.unpack(">I", head[0x344:0x348])[0]
+
+
+def stfs_kind(path):
+    """None unless the file is an Xbox 360 package; then a short description of what kind."""
+    t = stfs_type(path)
+    return None if t is None else STFS_TYPES.get(t, "a downloadable package")
+
+
+# ---- Xbox 360 Games on Demand (and the "installed game" kind): a game disc kept as a package, a small header file plus a "<name>.data" folder holding Data0000, Data0001 ...
+# The disc's data is cut into 4 KB blocks. Every 204 blocks follow a 4 KB table of their SHA-1 hashes, and 203 of those groups, behind a master table (one hash per group,
+# and in its last entry the hash of the next data file's master table), fill one data file. The header holds the hash of the first master table. Taking the tables out and
+# joining the blocks gives the disc's game partition, an XDVDFS image, so nothing is decrypted: the game's files stay exactly as they were on the disc, and the tables let
+# every block be checked on the way. Written from the public Free60 description of the format and checked on a real package; no code from any other converter.
+GOD_BLOCK = 0x1000
+GOD_PER_SUB = 204                                          # data blocks behind each hash table
+GOD_SUBS = 203                                             # hash tables in a full data file
+GOD_FILE_BLOCKS = 1 + GOD_SUBS * (1 + GOD_PER_SUB)         # a full data file: 41,616 blocks (170,459,136 bytes)
+GOD_TYPES = (0x7000, 0x4000)                               # Games on Demand, installed game
+GOD_MAX_IMAGE = 16 * 1024 ** 3                             # no Xbox 360 disc holds more than about 8.5 GB: a package that asks for a bigger image is broken or made up
+
+
+def _find_ci(parent, name, want_dir):
+    """parent/name, or a differently-capitalised twin of it (a copy made on another system can change the case; Linux cares, Windows doesn't) -> Path or None."""
+    p = Path(parent) / name
+    if p.is_dir() if want_dir else p.is_file():
+        return p
+    low = name.lower()
+    try:
+        for q in Path(parent).iterdir():
+            if q.name.lower() == low and (q.is_dir() if want_dir else q.is_file()):
+                return q
+    except OSError:
+        pass
+    return None
+
+
+def god_data_dir(header):
+    """The '<header>.data' folder beside a package's header file, or None."""
+    header = Path(header)
+    return _find_ci(header.parent, header.name + ".data", True)
+
+
+def god_redirect(path):
+    """A path inside a package's data folder (the folder itself, or one of its Data0000 files) -> the header file that stands for the package, else None."""
+    path = Path(path)
+    if path.is_dir() and path.name.lower().endswith(".data"):
+        dd = path
+    elif re.fullmatch(r"data\d{4}", path.name, re.I) and path.is_file() and path.parent.name.lower().endswith(".data"):
+        dd = path.parent
+    else:
+        return None
+    hdr = _find_ci(dd.parent, dd.name[:-5], False)
+    return hdr if hdr is not None and is_god_header(hdr) else None
+
+
+def _god_text(raw):
+    return raw.decode("utf-16-be", "replace").split("\0")[0].strip()
+
+
+def god_blocks_in(size):
+    """How many data blocks a data file of this size holds (None when its size can't belong to a data file)."""
+    if size % GOD_BLOCK or size < 3 * GOD_BLOCK:
+        return None
+    n = size // GOD_BLOCK - 1
+    subs, rest = divmod(n, 1 + GOD_PER_SUB)
+    if subs > GOD_SUBS or rest == 1 or (subs == GOD_SUBS and rest):
+        return None
+    return subs * GOD_PER_SUB + max(0, rest - 1)
+
+
+def god_info(path):
+    """None unless `path` is the header file of an Xbox 360 Games on Demand package; else a dict about it (name, IDs, data files, size of the disc data).
+    Raises ValueError with a plain sentence when it is one but can't be used (data files missing or the wrong size)."""
+    path = Path(path)
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x1800)
+    except OSError:
+        return None
+    if len(head) < 0x348 or head[:4] not in (b"LIVE", b"PIRS", b"CON ") or struct.unpack(">I", head[0x344:0x348])[0] not in GOD_TYPES:
+        return None
+    if len(head) < 0x1800:
+        raise ValueError("its header file is cut short, so it wasn't copied completely")
+    ctype = struct.unpack(">I", head[0x344:0x348])[0]
+    data_dir = god_data_dir(path)
+    if data_dir is None:
+        raise ValueError(f"it needs the folder that goes with it ({path.name}.data), and that isn't next to it. Keep the two together")
+    count = struct.unpack(">I", head[0x39D:0x3A1])[0]
+    if not 1 <= count <= 9999:
+        raise ValueError("its header doesn't say how many data files the game is in, so it can't be read")
+    files, present = [], 0
+    for i in range(count):
+        fp = _find_ci(data_dir, f"Data{i:04d}", False)
+        if fp is None:
+            raise ValueError(f"{data_dir.name} is missing Data{i:04d} (the package is in {count} data files)")
+        try:
+            size = fp.stat().st_size
+        except OSError:
+            raise ValueError(f"{fp.name} can't be read") from None
+        n = god_blocks_in(size)
+        if n is None or (i < count - 1 and size != GOD_FILE_BLOCKS * GOD_BLOCK):
+            raise ValueError(f"{fp.name} is not the size of a data file of this kind, so the package is damaged or was not copied completely")
+        files.append(fp)
+        present += n
+    vd = head[0x379:0x379 + 0x24]
+    blocks = present                      # every block the data files hold (the count in the header can be one short: the game's last file may end in the final block)
+    name = _god_text(head[0x411:0x411 + 0x80]) or _god_text(head[0x1691:0x1691 + 0x80])
+    return {"header": path, "dir": data_dir, "files": files, "type": ctype, "title_id": f"{struct.unpack('>I', head[0x360:0x364])[0]:08X}",
+            "media_id": f"{struct.unpack('>I', head[0x354:0x358])[0]:08X}", "name": name, "disc": head[0x366], "discs": head[0x367], "root": bytes(vd[4:24]),
+            "blocks": blocks, "payload": blocks * GOD_BLOCK, "size": sum(f.stat().st_size for f in files) + path.stat().st_size}
+
+
+def god_blocks(info, stopped=lambda: False):
+    """Yield the disc's data in order, a group of blocks at a time. Every hash table and every block is checked against the hashes stored
+    in the package, so what comes out is exactly what went in; raises UnpackError when anything doesn't match."""
+    sha1 = hashlib.sha1
+    expect, left = info["root"], info["blocks"]
+    for fp in info["files"]:
+        with open(fp, "rb") as f:
+            master = f.read(GOD_BLOCK)
+            if len(master) != GOD_BLOCK:
+                raise UnpackError(f"{fp.name} is cut short")
+            if any(expect) and sha1(master).digest() != expect:
+                first = fp == info["files"][0]
+                raise UnpackError(f"{fp.name}'s hash table doesn't match the hash stored for it, so the package is damaged or was changed" +
+                                  (", or it isn't a game-disc package of the kind this reads" if first else ""))
+            expect = master[GOD_SUBS * 20:GOD_SUBS * 20 + 20]
+            sub = 0
+            while left > 0:
+                if stopped():
+                    raise UnpackError("stopped")
+                buf = f.read(GOD_BLOCK * (1 + GOD_PER_SUB))
+                if not buf:
+                    break
+                if len(buf) % GOD_BLOCK or len(buf) < 2 * GOD_BLOCK or sub >= GOD_SUBS:
+                    raise UnpackError(f"{fp.name} is cut short or damaged")
+                table = buf[:GOD_BLOCK]
+                if sha1(table).digest() != master[sub * 20:sub * 20 + 20]:
+                    raise UnpackError(f"{fp.name}: a hash table (number {sub + 1}) doesn't match, so the package is damaged")
+                n = len(buf) // GOD_BLOCK - 1
+                for j in range(n):
+                    if sha1(buf[GOD_BLOCK * (1 + j):GOD_BLOCK * (2 + j)]).digest() != table[j * 20:j * 20 + 20]:
+                        raise UnpackError(f"{fp.name}: block {sub * GOD_PER_SUB + j + 1} doesn't match its hash, so the package is damaged")
+                take = min(n, left)
+                left -= take
+                sub += 1
+                yield buf[GOD_BLOCK:GOD_BLOCK * (1 + take)]
+        if left <= 0:
+            return
+    if left > 0:
+        raise UnpackError("the data files hold less than the header says")
+
+
+def _god_volume(h):
+    return len(h) >= 0x800 and h[:20] == XISO_MAGIC and h[0x7EC:0x800] == XISO_MAGIC
+
+
+def god_pieces(info, stopped=lambda: False):
+    """-> (size of the disc image, an iterator of (offset in the image, bytes)) that together rebuild the game disc inside the package; everything the
+    pieces don't cover is zeros. Two layouts exist. A plain one holds the disc from its first sector, with the volume at 0x10000. The "enhanced" one that Games on
+    Demand usually uses holds only the volume descriptor and then the disc from the root directory's sector on (the empty space before it is left out):
+    the descriptor goes back to 0x10000 and the rest to where the descriptor says the root directory is, so every sector number in the file system is right again."""
+    gen = god_blocks(info, stopped)
+    head = b""
+    for chunk in gen:
+        head += chunk
+        if len(head) >= 0x10800:
+            break
+
+    def rest(pos):
+        for c in gen:
+            yield pos, c
+            pos += len(c)
+    if _god_volume(head[0x10000:0x10800]):
+        if info["payload"] > GOD_MAX_IMAGE:
+            raise UnpackError("this package holds more data than any Xbox 360 disc does, so it can't be a game disc")
+        return info["payload"], _chain([(0, head)], rest(len(head)))
+    if _god_volume(head[:0x800]):
+        root = struct.unpack("<I", head[20:24])[0]
+        start = root * XISO_SECTOR - 0x800                  # where the data after the descriptor's own sector belongs
+        size = start + info["payload"] - 0x800
+        if start < 0x10800:
+            raise UnpackError("this package's game volume puts its files where the volume's own descriptor is, so it can't be rebuilt")
+        if size > GOD_MAX_IMAGE:
+            raise UnpackError("this package's game volume says its files are further into the disc than any Xbox 360 disc reaches, so it can't be rebuilt")
+        return size, _chain([(0x10000, head[:0x800]), (start, head[0x800:])], rest(start + len(head) - 0x800))
+    raise UnpackError("this package doesn't hold an Xbox 360 game disc (no game volume was found in it)")
+
+
+def _chain(first, more):
+    yield from first
+    yield from more
+
+
+def god_image_size(info):
+    """How big the disc image will be (reads only the start of the package). Raises UnpackError when the start isn't a game volume."""
+    size, pieces = god_pieces(info)
+    pieces.close()                                   # the generators end here; nothing more is read
+    return size
+
+
+def god_to_iso(info, dst, prog=None, stopped=lambda: False):
+    """Write the game disc inside a Games on Demand package as an Xbox 360 disc image (an XDVDFS volume at 0x10000, every file where the file system says). -> its size."""
+    size, pieces = god_pieces(info, stopped)
+    pos = 0
+    with open(dst, "wb") as out:
+        for off, data in pieces:
+            while pos < off:                                 # the stretch the package leaves out: zeros, as on the disc
+                if stopped():
+                    raise UnpackError("stopped")
+                n = min(off - pos, 1 << 20)
+                out.write(bytes(n))
+                pos += n
+            out.write(data)
+            pos += len(data)
+            if prog:
+                prog(pos / max(1, size))
+    if pos != size:
+        raise UnpackError("the disc image came out the wrong size")
+    return size
+
+
+def god_matches(info, iso, prog=None, stopped=lambda: False):
+    """True when the disc image holds exactly what the package holds (the package is read and checked again)."""
+    size, pieces = god_pieces(info, stopped)
+    if os.path.getsize(iso) != size:
+        return False
+    with open(iso, "rb") as f:
+        pos = 0
+        for off, data in pieces:
+            while pos < off:
+                n = min(off - pos, 1 << 20)
+                if f.read(n) != bytes(n):
+                    return False
+                pos += n
+            if f.read(len(data)) != data:
+                return False
+            pos += len(data)
+            if prog:
+                prog(pos / max(1, size))
+    return pos == size
+
+
+def is_god_header(path):
+    """True for an extension-less Xbox 360 package file of the kind that holds a game disc (Games on Demand, installed game) with its .data folder beside it."""
+    path = Path(path)
+    if path.suffix or god_data_dir(path) is None:
+        return False
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x348)
+    except OSError:
+        return False
+    return len(head) == 0x348 and head[:4] in (b"LIVE", b"PIRS", b"CON ") and struct.unpack(">I", head[0x344:0x348])[0] in GOD_TYPES
+
+
+def god_check_iso(path):
+    """Read the folders of a disc image made from a package -> the number of files in it. Raises UnpackError when they can't be read or a file lies past the end."""
+    _base, ents = xiso_files(path)
+    size = os.path.getsize(path)
+    files = [e for e in ents if e[1]]
+    if not files:
+        raise UnpackError("the disc image holds no files, so the package wasn't a game disc")
+    if any(e[2] + e[3] > size for e in files):
+        raise UnpackError("the disc image ends before one of the game's files does, so the package is incomplete")
+    return len(files)
 
 
 def xbox_iso_kind(path):
@@ -8319,16 +9339,42 @@ def linux_install_command(piece):
     return {"apt": "sudo apt install ", "dnf": "sudo dnf install ", "pacman": "sudo pacman -S ", "brew": "brew install "}[pm] + pkg
 
 
-# --------------------------------------------------------------------------- Linux right-click menu (KDE Dolphin, GNOME Files, "Open with")
-LINUX_MIME = "application/x-chdmanager-disc"
+# --------------------------------------------------------------------------- Linux right-click menu (KDE Dolphin, Thunar, Nemo, GNOME Files, Caja, "Open with")
 LINUX_NEW_EXTS = (".zar", ".pbp", ".vcd", ".zso", ".ecm", ".rvz", ".wia", ".wbfs", ".gcz", ".ciso", ".wux", ".wud", ".gcm", ".nrg", ".mds",
-                  ".mdf", ".ccd")   # types Linux doesn't know: registered as LINUX_MIME (the ones it does know are listed below instead)
-LINUX_SYS_MIMES = ("application/x-iso9660-image", "application/x-cd-image", "application/vnd.efi.iso", "application/vnd.efi.img",
-                   "application/x-cue", "application/x-gd-rom-cue", "application/x-cdrdao-toc", "application/x-discjuggler-cd-image",
-                   "application/x-compressed-iso", "application/x-mame-chd", "application/x-raw-disk-image", "application/x-nrg",
-                   "application/x-gamecube-rom", "application/x-wii-rom", "application/x-gamecube-iso-image",
-                   "application/x-wii-iso-image", "application/x-wbfs")
-LINUX_TO = ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "zso", "ecm", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder")
+                  ".mdf", ".ccd", ".cxi", ".cia", ".nsp", ".xci", ".nup", ".zcci", ".zcxi", ".z3dsx", ".tg16", ".dsi")   # types Linux doesn't know: the program registers them itself (one type per group of files below)
+# The types Linux already knows (and the names some systems use for them), each with an extension that stands for it, so a file gets the same choices on Linux as on Windows.
+# Checked against Ubuntu 24.04's list of file types; a system that names a type differently shows the menu's "Convert with" through "Open with" only.
+LINUX_MIME_EXT = {
+    "application/x-iso9660-image": ".iso", "application/x-cd-image": ".iso", "application/vnd.efi.iso": ".iso",
+    "application/vnd.efi.img": ".img", "application/x-raw-disk-image": ".img",
+    "application/x-cue": ".cue", "application/x-gd-rom-cue": ".gdi", "application/x-cdrdao-toc": ".toc",
+    "application/x-discjuggler-cd-image": ".cdi", "application/x-compressed-iso": ".cso", "application/x-mame-chd": ".chd", "application/x-nrg": ".nrg",
+    "application/x-gamecube-rom": ".gcm", "application/x-wii-rom": ".gcm", "application/x-gamecube-iso-image": ".gcm", "application/x-wii-iso-image": ".gcm",
+    "application/x-wbfs": ".wbfs",
+    "application/x-n64-rom": ".z64",                                      # N64 (.z64 .v64 .n64)
+    "application/vnd.nintendo.snes.rom": ".smc",                          # SNES (.smc .sfc)
+    "application/x-genesis-rom": ".smd",                                  # Mega Drive (.gen .smd)
+    "application/x-nintendo-3ds-rom": ".3ds", "image/x-3ds": ".3ds",      # Ubuntu names a .3ds "image/x-3ds" (a 3D model): the menu also shows on those, and the program turns away what isn't a game
+    "application/x-nintendo-3ds-executable": ".3dsx",
+    "application/x-xar": ".pkg",                                          # a PS3 .pkg (Ubuntu calls it a macOS-style package)
+    "application/x-pc-engine-rom": ".pce", "application/x-nintendo-ds-rom": ".nds"}
+LINUX_SYS_MIMES = tuple(LINUX_MIME_EXT)
+LINUX_MD_BOTH = ("md_normal", "md_smd")      # Linux has one type for Mega Drive files (.smd, .gen, .md), so a file of it is offered both ways
+
+
+def linux_groups():
+    """[(slug, conversions, known types, new extensions, our type for them or None)]: one entry for every distinct set of conversions the Windows menu offers
+    (files that can become the same things share a group), plus one for folders. The Dolphin menu has a file for each, so a file is offered only what fits it."""
+    by = {}
+    for ext, tg in CTX_TARGETS.items():
+        by.setdefault(LINUX_MD_BOTH if ext == ".smd" else tuple(tg), []).append(ext)
+    out = []
+    for tg, exts in by.items():
+        new = [e for e in exts if e in LINUX_NEW_EXTS]
+        out.append((exts[0].lstrip("."), tg, [m for m, e in LINUX_MIME_EXT.items() if e in exts], new,
+                    "application/x-chdmanager-" + new[0].lstrip(".") if new else None))
+    out.append(("folder", tuple(CTX_FOLDER), [], [], None))
+    return out
 
 
 def linux_data_home():
@@ -8345,37 +9391,253 @@ def linux_program():
 LINUX_SCRIPT_CONVERT = "Game Format Converter - Convert"
 LINUX_SCRIPT_ADD = "Game Format Converter - Add to list"
 LINUX_OLD_SCRIPTS = ("CHD Manager - Convert", "CHD Manager - Add to list")          # what versions before 2.1 called them: removed so the menu has no doubles
+LINUX_OLD_MENU = "chd-manager.desktop"                                                # 2.1.0 had one Dolphin menu file with every conversion for every file; now one file per group (chd-manager-<group>.desktop)
+UCA_PREFIX = "gfc-"                                                                   # every Thunar action this program writes has an id that starts like this: how it finds its own again among yours
+UCA_SUBMENU = "Game Format Converter"
+UCA_BEGIN = "<!-- Game Format Converter: begin (the program adds and removes this block; the rest of the file is left as it is) -->"
+UCA_END = "<!-- Game Format Converter: end -->"
+NEMO_ACTIONS = (("chd-manager-convert", "Convert with Game Format Converter", "Convert this folder with Game Format Converter", "--start"),
+                ("chd-manager-add", "Add to the Game Format Converter list", "Add this folder to the Game Format Converter list", ""))
 
 
-def linux_menu_files(prog=None, data=None):
-    """{path: (text, executable)} of every file the Linux right-click menu consists of (all inside the user's own ~/.local/share)."""
+def linux_config_home():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+
+
+def _linux_dirs(data=None, config=None):
+    """(data folder, config folder). Given only a data folder (a test in a scratch folder) the config folder sits inside it, so nothing outside it is touched."""
+    cfg = Path(config) if config else (Path(data) / "config" if data else linux_config_home())
+    return (Path(data) if data else linux_data_home()), cfg
+
+
+def linux_action_label(key):
+    """The menu text for one conversion: '→ CHD' becomes 'Convert to CHD'; 'Verify only' and 'Recompress' stay as they are."""
+    text = TARGET_LABELS[key]
+    return "Convert to " + text[2:].strip() if text.startswith("→ ") else text
+
+
+def _ext_variants(exts, star=""):
+    """['.iso', '.cue'] -> ['iso', 'ISO', 'cue', 'CUE'] (or '*.iso', '*.ISO' with star='*.'): file managers match case-sensitively, so both usual spellings go in."""
+    out = []
+    for e in exts:
+        e = e.lstrip(".")
+        for v in (e, e.upper()):
+            if (star + v) not in out:
+                out.append(star + v)
+    return out
+
+
+def linux_menu_files(prog=None, data=None, config=None):
+    """{path: (text, executable)} of every file the Linux right-click menu consists of (all inside the user's own ~/.local/share and ~/.config).
+    Thunar keeps all its actions in one shared file, so that one is handled apart (thunar_uca_install)."""
     import shlex
     prog = prog or linux_program()
-    data = Path(data) if data else linux_data_home()
+    data, cfg = _linux_dirs(data, config)
     bad = [x for x in prog if re.search(r'["`$\\]|[\n\r]', x)]
     if bad:
         raise ValueError("the program's path has characters (a quote, $, ` or \\) that a menu entry can't hold: " + bad[0])
     ex = " ".join('"%s"' % x for x in prog)                 # desktop-entry style: double-quoted words
-    sh = " ".join(shlex.quote(x) for x in prog)             # shell style, for the Nautilus scripts
-    mimes = ";".join(LINUX_SYS_MIMES + (LINUX_MIME,)) + ";"
+    sh = " ".join(shlex.quote(x) for x in prog)             # shell style, for the file managers' scripts
+    groups = linux_groups()
+    allm = list(dict.fromkeys([m for g in groups for m in g[2]] + [g[4] for g in groups if g[4]]))
     files = {}
     files[data / "applications" / "chd-manager.desktop"] = (
         "[Desktop Entry]\nType=Application\nName=Game Format Converter\nComment=Convert game images and files between formats\n"
-        f"Exec={ex} %F\nTerminal=false\nCategories=Utility;\nMimeType={mimes}\n", False)
-    acts = [("convert", "Convert with Game Format Converter", "--start"), ("add", "Add to the Game Format Converter list", "")]
-    acts += [(f"to_{k}", "Convert to " + TARGET_LABELS[k].replace("→ ", "").strip(), f"--start --to {k}") for k in LINUX_TO]
-    text = ("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n"
-            f"MimeType={mimes}inode/directory;\nX-KDE-Submenu=Game Format Converter\nActions={';'.join(a[0] for a in acts)};\n")
-    for key, name, args in acts:
-        text += f"\n[Desktop Action {key}]\nName={name}\nExec={ex} {args + ' ' if args else ''}%F\n"
-    files[data / "kio" / "servicemenus" / "chd-manager.desktop"] = (text, True)
+        f"Exec={ex} %F\nTerminal=false\nCategories=Utility;\nMimeType={';'.join(allm)};\n", False)
+    for slug, targets, sysm, new, ours in groups:
+        mimes = sysm + ([ours] if ours else []) + (["inode/directory"] if slug == "folder" else [])
+        acts = [("convert", "Convert with Game Format Converter", "--start"), ("add", "Add to the Game Format Converter list", "")]
+        acts += [("to-" + k.replace("_", "-"), linux_action_label(k), f"--start --to {k}") for k in targets]
+        text = ("[Desktop Entry]\nType=Service\nX-KDE-ServiceTypes=KonqPopupMenu/Plugin\n"
+                f"MimeType={';'.join(mimes)};\nX-KDE-Submenu=Game Format Converter\nActions={';'.join(a[0] for a in acts)};\n")
+        for key, name, args in acts:
+            text += f"\n[Desktop Action {key}]\nName={name}\nExec={ex} {args + ' ' if args else ''}%F\n"
+        files[data / "kio" / "servicemenus" / f"chd-manager-{slug}.desktop"] = (text, True)
     files[data / "mime" / "packages" / "chd-manager.xml"] = (
         '<?xml version="1.0" encoding="UTF-8"?>\n<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">\n'
-        f'  <mime-type type="{LINUX_MIME}">\n    <comment>Game disc image</comment>\n'
-        + "".join(f'    <glob pattern="*{e}"/>\n' for e in LINUX_NEW_EXTS) + "  </mime-type>\n</mime-info>\n", False)
-    for name, args in ((LINUX_SCRIPT_CONVERT, "--start"), (LINUX_SCRIPT_ADD, "")):
-        files[data / "nautilus" / "scripts" / name] = (f'#!/bin/sh\nexec {sh} {args + " " if args else ""}"$@"\n', True)
+        + "".join(f'  <mime-type type="{ours}">\n    <comment>Game disc image</comment>\n' + "".join(f'    <glob pattern="*{e}"/>\n' for e in new) + "  </mime-type>\n"
+                  for _s, _t, _m, new, ours in groups if ours) + "</mime-info>\n", False)
+    for name, args in ((LINUX_SCRIPT_CONVERT, "--start"), (LINUX_SCRIPT_ADD, "")):          # GNOME Files (Nautilus) and Caja (MATE) have the same kind of script menu
+        script = (f'#!/bin/sh\nexec {sh} {args + " " if args else ""}"$@"\n', True)
+        files[data / "nautilus" / "scripts" / name] = script
+        files[cfg / "caja" / "scripts" / name] = script
+    allx = ";".join(_ext_variants(CTX_TARGETS)) + ";"        # Nemo (Linux Mint) lists one entry per action file and has no submenus, so: Convert and Add, for files and for folders
+    for stem, name, folder_name, args in NEMO_ACTIONS:
+        for folder in (False, True):
+            files[data / "nemo" / "actions" / (stem + ("-folder" if folder else "") + ".nemo_action")] = (
+                f"[Nemo Action]\nName={folder_name if folder else name}\nComment={'The format is chosen in the window' if args else 'Puts it in the window without converting yet'}\n"
+                f"Exec={ex} {args + ' ' if args else ''}%F\nSelection=notnone\nExtensions={'dir;' if folder else allx}\nQuote=double\nIcon-Name=media-optical\n", False)
     return files
+
+
+def thunar_entries(prog=None):
+    """Thunar's custom actions, in a submenu 'Game Format Converter': [(id, name, description, command, patterns, is_folder_action)].
+    Thunar chooses by file name (a pattern) and by kind of file, so each conversion is offered exactly on the extensions the Windows menu offers it on."""
+    prog = prog or linux_program()
+    ex = " ".join('"%s"' % x for x in prog)
+    by = {}
+    for ext, tg in CTX_TARGETS.items():
+        for k in tg:
+            by.setdefault(k, []).append(ext)
+    allp = ";".join(_ext_variants(CTX_TARGETS, "*."))
+    out = [(UCA_PREFIX + "convert", "Convert with Game Format Converter", "Convert the selected files; the format is chosen in the window", f"{ex} --start %F", allp, False),
+           (UCA_PREFIX + "add", "Add to the Game Format Converter list", "Put the selected files in the window without converting yet", f"{ex} %F", allp, False)]
+    for k, exts in by.items():
+        out.append((UCA_PREFIX + "to-" + k.replace("_", "-"), linux_action_label(k), "Convert the selected files and start", f"{ex} --start --to {k} %F", ";".join(_ext_variants(exts, "*.")), False))
+    out += [(UCA_PREFIX + "convert-folder", CTX_TEXT[True][0], "Convert the folder; the format is chosen in the window", f"{ex} --start %F", "*", True),
+            (UCA_PREFIX + "add-folder", "Add this folder to the Game Format Converter list", "Put the folder in the window without converting yet", f"{ex} %F", "*", True)]
+    out += [(UCA_PREFIX + "to-" + k + "-folder", linux_action_label(k) + " (this folder)", "Convert the folder and start", f"{ex} --start --to {k} %F", "*", True) for k in CTX_FOLDER]
+    return out
+
+
+def _uca_xml(entry):
+    """One <action> element in exactly the shape Thunar's own writer produces."""
+    from xml.sax.saxutils import escape
+    uid, name, desc, cmd, pats, folder = entry
+    flags = "\t<directories/>\n" if folder else "".join(f"\t<{k}-files/>\n" for k in ("audio", "image", "other", "text", "video"))
+    return ("<action>\n\t<icon>media-optical</icon>\n" f"\t<name>{escape(name)}</name>\n\t<submenu>{UCA_SUBMENU}</submenu>\n\t<unique-id>{escape(uid)}</unique-id>\n"
+            f"\t<command>{escape(cmd)}</command>\n\t<description>{escape(desc)}</description>\n\t<range></range>\n\t<patterns>{escape(pats)}</patterns>\n{flags}</action>\n")
+
+
+def _uca_load(path):
+    """The root <actions> element of a Thunar actions file; ValueError (with a plain reason) when it can't be read as one."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.parse(path).getroot()
+    except (ET.ParseError, OSError) as e:
+        raise ValueError(f"{path} can't be read ({e})")
+    if root.tag != "actions":
+        raise ValueError(f"{path} isn't a Thunar actions file")
+    return root
+
+
+def _uca_ours(a):
+    return (a.findtext("unique-id") or "").startswith(UCA_PREFIX)
+
+
+def _uca_canon(a):
+    """What an action means, ignoring layout and the order of its flags: so a file Thunar re-saved still counts as the same."""
+    texts = tuple(sorted((c.tag, (c.text or "").strip()) for c in a if not c.tag.endswith("-files") and c.tag not in ("directories", "startup-notify")))
+    return texts, frozenset(c.tag for c in a if c.tag.endswith("-files") or c.tag == "directories")
+
+
+def thunar_uca_path(config=None):
+    return _linux_dirs(None, config)[1] / "Thunar" / "uca.xml"
+
+
+def thunar_wanted(config=None):
+    """Thunar's actions file is only touched where Thunar seems to be in use: it has a settings folder, or the program is installed."""
+    return (_linux_dirs(None, config)[1] / "Thunar").is_dir() or bool(shutil.which("thunar"))
+
+
+def thunar_uca_state(config=None, prog=None):
+    """'absent' (none of our actions in the file, or no file), 'current', 'outdated' (ours are there but differ: another version or another folder), or 'unreadable'."""
+    import xml.etree.ElementTree as ET
+    path = thunar_uca_path(config)
+    if not path.is_file():
+        return "absent"
+    try:
+        have = {a.findtext("unique-id"): _uca_canon(a) for a in _uca_load(path).findall("action") if _uca_ours(a)}
+    except ValueError:
+        return "unreadable"
+    if not have:
+        return "absent"
+    want = {e[0]: _uca_canon(ET.fromstring(_uca_xml(e))) for e in thunar_entries(prog)}
+    return "current" if have == want else "outdated"
+
+
+_UCA_MARKED = re.compile(r"[ \t]*" + re.escape(UCA_BEGIN) + r".*?" + re.escape(UCA_END) + r"[ \t]*(?:\r?\n)?", re.S)
+_UCA_OURS = re.compile(r"[ \t]*<action>(?:(?!</action>).)*?<unique-id>" + re.escape(UCA_PREFIX) + r"(?:(?!</action>).)*</action>[ \t]*(?:\r?\n)?", re.S)
+
+
+class LinuxMenuNote(ValueError):
+    """The menu was added, but one part (Thunar's actions file) couldn't be: said plainly, not as a failure."""
+
+
+def _uca_read(path):
+    """(text, has a BOM, line ending) of Thunar's actions file, after checking it really is a readable actions file; ValueError (with the reason) if not."""
+    _uca_load(path)
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"{path} isn't UTF-8 text ({e})")
+    return text, raw.startswith(b"\xef\xbb\xbf"), ("\r\n" if "\r\n" in text else "\n")
+
+
+def _uca_strip(text):
+    """The file without our actions: the marked block, and (if Thunar re-saved the file and dropped the markers) every action whose id starts with ours.
+    Nothing else is touched, so the user's own actions, comments and layout stay exactly as they were."""
+    parts = re.split(r"(<!--.*?-->)", _UCA_MARKED.sub("", text), flags=re.S)          # what is inside the user's own comments is never looked at
+    return "".join(p if p.startswith("<!--") else _UCA_OURS.sub("", p) for p in parts)
+
+
+def _uca_insert(text, block, nl):
+    block = block.replace("\n", nl)
+    ends = list(re.finditer(r"</actions\s*>", text))
+    if ends:
+        i = ends[-1].start()
+        return text[:i] + ("" if i == 0 or text[i - 1] == "\n" else nl) + block + text[i:]
+    m = re.search(r"<actions\s*/>", text)
+    if m:
+        return text[:m.start()] + "<actions>" + nl + block + "</actions>" + text[m.end():]
+    raise ValueError("it has no <actions> element to add to")
+
+
+def _uca_write(path, text, bom=False):
+    """Write the actions file in one step (a temp file, then a rename), so Thunar never sees half a file. The file keeps its permissions; a symlinked file
+    (a dotfiles setup) stays a link: the file it points to is the one written."""
+    import xml.etree.ElementTree as ET
+    try:
+        ET.fromstring(text.encode("utf-8"))
+    except ET.ParseError as e:
+        raise ValueError(f"{path} would not be well-formed after the change ({e}), so it was left alone")
+    real = Path(os.path.realpath(path))
+    real.parent.mkdir(parents=True, exist_ok=True)
+    tmp = real.with_name(real.name + ".tmp")
+    try:
+        tmp.write_bytes((b"\xef\xbb\xbf" if bom else b"") + text.encode("utf-8"))
+        if real.exists():
+            shutil.copymode(real, tmp)
+        os.replace(tmp, real)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def thunar_uca_install(config=None, prog=None):
+    """Put the 'Game Format Converter' submenu into Thunar's custom actions. Only our block is added (replacing an older copy of it): everything else in the file,
+    the user's actions, comments and layout, stays byte for byte as it was."""
+    path = thunar_uca_path(config)
+    block = UCA_BEGIN + "\n" + "".join(_uca_xml(e) for e in thunar_entries(prog)) + UCA_END + "\n"
+    if path.is_file():
+        text, bom, nl = _uca_read(path)                           # unreadable: ValueError, and the file is left exactly as it is
+        new = _uca_insert(_uca_strip(text), block, nl)
+        if new == text:
+            return
+    else:
+        new, bom = '<?xml version="1.0" encoding="UTF-8"?>\n<actions>\n' + block + "</actions>\n", False
+    _uca_write(path, new, bom)
+
+
+def thunar_uca_remove(config=None):
+    """Take our actions out of Thunar's file again, leaving everything else exactly as it was. A file that then holds nothing (we made it) is deleted."""
+    path = thunar_uca_path(config)
+    if not path.is_file():
+        return
+    try:
+        text, bom, _nl = _uca_read(path)
+    except ValueError:
+        return
+    new = _uca_strip(text)
+    if new == text:
+        return
+    if re.fullmatch(r"\s*(<\?xml[^>]*\?>)?\s*<actions\s*>\s*</actions\s*>\s*", new) and not path.is_symlink():
+        path.unlink()
+        return
+    _uca_write(path, new, bom)
 
 
 def linux_menu_installed(data=None):
@@ -8392,28 +9654,48 @@ def _linux_refresh(data):
                 pass
 
 
-def linux_menu_install(data=None, prog=None):
-    data = Path(data) if data else linux_data_home()
-    for old in LINUX_OLD_SCRIPTS:
+def _linux_stale(data, keep=()):
+    """Menu files an earlier version wrote that the current menu no longer has (the old Nautilus script names, the old single Dolphin file, groups that no longer exist)."""
+    sm = data / "kio" / "servicemenus"
+    stale = [data / "nautilus" / "scripts" / old for old in LINUX_OLD_SCRIPTS] + [sm / LINUX_OLD_MENU]
+    try:
+        stale += [p for p in sm.glob("chd-manager-*.desktop")] + [p for p in (data / "nemo" / "actions").glob("chd-manager-*.nemo_action")]
+    except OSError:
+        pass
+    return [p for p in stale if p not in keep]
+
+
+def linux_menu_install(data=None, prog=None, config=None, thunar=None):
+    """Write the whole menu. thunar=None adds the Thunar submenu only where Thunar seems to be in use; True/False forces it.
+    If Thunar's own actions file can't be read, everything else is still written and ValueError says so at the end."""
+    d, cfg = _linux_dirs(data, config)
+    files = linux_menu_files(prog, d, cfg)
+    for old in _linux_stale(d, keep=files):
         try:
-            (data / "nautilus" / "scripts" / old).unlink()
+            old.unlink()
         except OSError:
             pass
-    for path, (text, executable) in linux_menu_files(prog, data).items():
+    for path, (text, executable) in files.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, "utf-8", newline="\n")
         path.chmod(0o755 if executable else 0o644)
-    _linux_refresh(data)
+    _linux_refresh(d)
+    if thunar or (thunar is None and thunar_wanted(cfg)):
+        try:
+            thunar_uca_install(cfg, prog)
+        except (ValueError, OSError) as e:
+            raise LinuxMenuNote(f"The menu was added for the other file managers, but Thunar was left alone: {e}. Thunar's own actions file was not changed.")
 
 
-def linux_menu_remove(data=None):
-    data = Path(data) if data else linux_data_home()
-    for path in list(linux_menu_files(["x"], data)) + [data / "nautilus" / "scripts" / old for old in LINUX_OLD_SCRIPTS]:
+def linux_menu_remove(data=None, config=None):
+    d, cfg = _linux_dirs(data, config)
+    for path in list(linux_menu_files(["x"], d, cfg)) + _linux_stale(d):
         try:
             path.unlink()
         except OSError:
             pass
-    _linux_refresh(data)
+    thunar_uca_remove(cfg)
+    _linux_refresh(d)
 
 
 # --------------------------------------------------------------------------- Windows right-click menu
@@ -8422,7 +9704,12 @@ CTX_TARGETS = {**{e: ("chd", "cue", "iso", "pbp", "cdi", "vcd", "cso", "cso2", "
                **{e: ("chd", "iso", "cso", "cso2", "zso") for e in (".cso", ".zso")},
                **{e: ("iso", "rvz", "gcz", "wia", "wbfs", "ciso", "wux", "wud") for e in (".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud")},
                ".iso": ("chd", "cso", "cso2", "zso", "rvz", "gcz", "wia", "wbfs", "ciso", "zar", "folder"), ".zar": ("chd", "iso", "folder"), ".pkg": ("folder",), ".nsp": ("xci",), ".xci": ("nsp",), ".nup": ("folder",), ".3ds": ("z3ds", "cia"), ".cci": ("z3ds", "cia"), ".cxi": ("z3ds",), ".3dsx": ("z3ds",),
-               ".zcci": ("unz3ds",), ".zcxi": ("unz3ds",), ".z3dsx": ("unz3ds",), ".cia": ("cci",)}
+               ".zcci": ("unz3ds",), ".zcxi": ("unz3ds",), ".z3dsx": ("unz3ds",), ".cia": ("cci",),
+               **{e: ("n64_z64", "n64_v64", "n64_n64") for e in (".z64", ".v64", ".n64")},
+               **{e: ("snes_strip", "snes_add") for e in (".smc", ".sfc")},
+               ".smd": ("md_normal",),
+               **{e: ("pce_strip", "pce_add") for e in (".pce", ".tg16")},
+               **{e: ("nds_trim", "nds_untrim") for e in (".nds", ".dsi")}}
 CTX_FOLDER = ("chd", "cue", "iso", "zar")                              # what a folder's 'Convert to' offers
 CTX_EXTS = tuple(CTX_TARGETS)                                    # archives are left out on purpose: no menu on every zip
 CTX_BASE = r"Software\Classes\SystemFileAssociations"          # per user (HKCU): no administrator needed, doesn't change what a double-click opens
@@ -8457,19 +9744,36 @@ def ctx_menu_installed(reg=None, base=CTX_BASE, dirbase=CTX_DIR):
         return False
 
 
-def ctx_menu_outdated(reg=None, base=CTX_BASE, dirbase=CTX_DIR, data=None):
+def ctx_menu_outdated(reg=None, base=CTX_BASE, dirbase=CTX_DIR, data=None, prog=None, config=None, thunar=None):
     """True when a right-click menu that was added earlier still carries the names of an older version (before 2.1 it said 'CHD Manager'),
     so the program can quietly rewrite it. A menu that isn't installed is never touched."""
     try:
         if reg is None and os.name != "nt":
             if not linux_menu_installed(data):
                 return False
-            d = Path(data) if data else linux_data_home()
-            return "Name=" + APP_NAME not in (d / "applications" / "chd-manager.desktop").read_text("utf-8")
+            d, cfg = _linux_dirs(data, config)
+            want = linux_menu_files(prog, d, cfg)
+            if any(p.exists() for p in _linux_stale(d, keep=want)):                              # an older layout (one Dolphin file for every type, the old script names)
+                return True
+            for path, (text, _x) in want.items():                                                # anything that differs: a file type added since, a file manager added since, or the program moved to another folder
+                try:
+                    if path.read_text("utf-8") != text:
+                        return True
+                except OSError:
+                    return True
+            return bool((thunar or (thunar is None and thunar_wanted(cfg))) and thunar_uca_state(cfg, prog) == "outdated")
         if reg is None:
             import winreg as reg
         with reg.OpenKey(reg.HKEY_CURRENT_USER, rf"{ctx_roots(base, dirbase)[0][0]}\shell\CHDManager.Convert") as k:
-            return reg.QueryValueEx(k, "")[0] != CTX_TEXT[False][0]
+            if reg.QueryValueEx(k, "")[0] != CTX_TEXT[False][0]:
+                return True
+        for path, _targets, _folder in ctx_roots(base, dirbase):          # an installed menu that misses a file type added in a later version
+            try:
+                with reg.OpenKey(reg.HKEY_CURRENT_USER, rf"{path}\shell\CHDManager.Convert"):
+                    pass
+            except OSError:
+                return True
+        return False
     except (OSError, ValueError):
         return False
 
@@ -8954,6 +10258,8 @@ class App:
             self.v[key].trace_add("write", lambda *a: self.refresh_summary())
         for key in ("dolphintool", "wii_common_key", "wii_korean_key", "wbfs_scrub", "rpcs3", "pkg_key", "switch_keys"):
             self.v[key].trace_add("write", lambda *a: self.refresh_wii())
+        PSP_DROP[0] = bool(self.v["psp_drop_update"].get())
+        self.v["psp_drop_update"].trace_add("write", lambda *a: self.psp_drop_changed())
         self.style_widgets()
         self.refresh_summary()
         self.refresh_chd_controls()
@@ -9131,15 +10437,20 @@ class App:
                         variable=v["ps3_split"]).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(g4, text="Keep the PS3_UPDATE folder when making an ISO (a system update on real discs; no emulator uses it)",
                         variable=v["ps3_update"]).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), Game Format Converter uses your own RPCS3 and contains no keys.\n"
-                           "Show it where rpcs3.exe is (your RPCS3 and its games are never changed):").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        pr = ttk.Frame(g4)
-        pr.grid(row=3, column=0, sticky="w", pady=(4, 0))
-        ttk.Entry(pr, textvariable=v["rpcs3"], width=44).grid(row=0, column=0)
-        ttk.Button(pr, text="Browse…", command=self.pick_rpcs3).grid(row=0, column=1, padx=4)
-        ttk.Label(g4, text="No RPCS3? Then give your own package key instead (32 letters and numbers, or a file that holds it).\n"
-                           "Game Format Converter contains no keys and never downloads them. RPCS3 is used first when both are set.").grid(
-            row=4, column=0, sticky="w", pady=(10, 0))
+        if os.name == "nt":
+            ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), Game Format Converter uses your own RPCS3 and contains no keys.\n"
+                               "Show it where rpcs3.exe is (your RPCS3 and its games are never changed):").grid(row=2, column=0, sticky="w", pady=(10, 0))
+            pr = ttk.Frame(g4)
+            pr.grid(row=3, column=0, sticky="w", pady=(4, 0))
+            ttk.Entry(pr, textvariable=v["rpcs3"], width=44).grid(row=0, column=0)
+            ttk.Button(pr, text="Browse…", command=self.pick_rpcs3).grid(row=0, column=1, padx=4)
+            ttk.Label(g4, text="No RPCS3? Then give your own package key instead (32 letters and numbers, or a file that holds it).\n"
+                               "Game Format Converter contains no keys and never downloads them. RPCS3 is used first when both are set.").grid(
+                row=4, column=0, sticky="w", pady=(10, 0))
+        else:
+            ttk.Label(g4, text="To unpack .pkg packages (a game, with its updates merged in), Game Format Converter needs your own package key: RPCS3 can only be used\n"
+                               "from Windows. Give the key here (32 letters and numbers, or a file that holds it); Game Format Converter contains no keys and never downloads them.").grid(
+                row=4, column=0, sticky="w", pady=(10, 0))
         kf = ttk.Frame(g4)
         kf.grid(row=5, column=0, sticky="w", pady=(4, 0))
         self.pkg_key_entry = tk.StringVar()
@@ -9627,7 +10938,7 @@ class App:
 
     def action_choices(self, job):
         """[(label, target key)] offered in the Action drop-down of one row: only what can work for that item."""
-        return [(label, key) for key, label in job.available_targets()]
+        return [(job_target_label(job, key), key) for key, _label in job.available_targets()]
 
     cso2_ok = False
 
@@ -9804,7 +11115,8 @@ class App:
         self.close_picker()
         choices = self.action_choices(job)
         cb = ttk.Combobox(self.tree, state="readonly", values=[c[0] for c in choices])
-        cb.place(x=box[0], y=box[1], width=max(box[2], 290), height=box[3])
+        fit = max((self.tree_font().measure(c[0]) for c in choices), default=0) + 56          # wide enough for the longest choice, so no label is cut off
+        cb.place(x=box[0], y=box[1], width=max(box[2], 290, fit), height=box[3])
         cb.bind("<<ComboboxSelected>>", lambda ev: self.pick_action(job, choices[cb.current()]))
         cb.set(job.action_label().replace("  ▾", ""))
         cb.bind("<Escape>", lambda ev: self.close_picker())
@@ -9823,7 +11135,7 @@ class App:
     def action_text_for(self, job):
         if job.target == "chd" and job.disc_count > 1:
             return f"→ {job.disc_count} CHDs"
-        return target_label(job.target or "") or "Extract"
+        return job_target_label(job, job.target or "") or "Extract"
 
     def update_action_labels(self):
         for j in self.jobs:
@@ -9835,7 +11147,7 @@ class App:
     def plan_text(self):
         c = {}
         for j in self.jobs:
-            lab = target_label(j.target or "")
+            lab = job_target_label(j, j.target or "")
             c[lab] = c.get(lab, 0) + 1
         return "  ·  ".join(f"{n} {lab}" for lab, n in c.items())
 
@@ -9969,7 +11281,7 @@ class App:
 
     def pick_chdman(self):
         global CHDMAN
-        p = filedialog.askopenfilename(title="Select chdman.exe", filetypes=[("chdman", "chdman.exe"), ("All", "*.*")])
+        p = filedialog.askopenfilename(title="Select chdman.exe" if os.name == "nt" else "Select chdman", filetypes=[("chdman", "chdman.exe"), ("All", "*.*")] if os.name == "nt" else [("All files", "*")])
         if p:
             CHDMAN = p
             self.chd_path_var.set(p)
@@ -9982,7 +11294,7 @@ class App:
     def add_files_dialog(self):
         files = filedialog.askopenfilenames(
             title="Select disc images or CHD files", initialdir=self.settings.get("last_dir") or None,
-            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.zar *.mds *.nrg *.ccd *.img *.m3u *.chd *.pkg"), ("All files", "*.*")])
+            filetypes=[("Disc images / CHD", "*.cue *.gdi *.iso *.toc *.bin *.pbp *.cdi *.vcd *.zar *.mds *.nrg *.ccd *.img *.m3u *.chd *.pkg *.z64 *.v64 *.n64 *.smc *.sfc *.smd *.md *.gen *.pce *.nds"), ("All files", "*.*")])
         if files:
             self.settings["last_dir"] = str(Path(files[0]).parent)
             self.add_paths(files)
@@ -10104,6 +11416,10 @@ class App:
         picked = sheet_refs(p for p in map(Path, paths) if not p.is_dir())      # what the .cue/.gdi/.toc files picked here point to
         self.add_progress(0, 1, "Looking at what you added…")
         for p in map(Path, paths):
+            hdr = god_redirect(p)
+            if hdr is not None:                                 # the .data folder, or a file in it: the package is its header file, which sits beside the folder
+                self.log(f"{p.name} is part of an Xbox 360 package, so its header file {hdr.name} was added instead.", "info")
+                p = hdr
             if p.is_dir():
                 self.add_progress(0, 1, f"Looking through {p.name}…")
                 files, ignored = self.scan_folder(p)
@@ -10129,13 +11445,19 @@ class App:
             elif split_set(p) is not None:                  # one piece of a split PS3 disc image: the first piece stands for the whole set
                 if (split_first(p), None) not in found:
                     found.append((split_first(p), None))
-            elif p.suffix.lower() in SRC_EXTS | {".chd"}:
+            elif p.suffix.lower() in SRC_EXTS | {".chd"} or (p.suffix.lower() in (".md", ".gen") and is_md_rom(p)) or (p.suffix.lower() in (".swc", ".fig") and is_snes_rom(p)) or (p.suffix.lower() == ".sgx" and is_pce_rom(p)):
                 found.append((image_primary(p), None))
+            elif is_god_header(p):                          # a Games on Demand package: the header file; its .data folder stays beside it
+                found.append((p, None))
             else:
                 pk = stfs_kind(p)
-                if pk:
-                    self.refuse(p.name, sentence(f"This is an Xbox 360 download package ({pk}), not a disc image. A package isn't a disc, so there is "
-                                                 "nothing to convert: Xenia plays it as it is (if it has a matching .data folder, keep that next to it)"), "warn",
+                if pk and stfs_type(p) in GOD_TYPES and not p.suffix:
+                    self.refuse(p.name, sentence(f"This is an Xbox 360 game package ({pk}), but the folder that goes with it ({p.name}.data) isn't next to it, and the game is in that folder. "
+                                                 "Keep the two together"), "warn", f"Skipped (Xbox 360 package without its .data folder): {p.name}")
+                elif pk:
+                    self.refuse(p.name, sentence(f"This is an Xbox 360 download package ({pk}), not a disc image. A package of this kind isn't a disc, so there is "
+                                                 "nothing to convert: Xenia plays it as it is. (A Games on Demand game can be converted: add its header file, the one with the long "
+                                                 "code for a name, with its .data folder next to it.)"), "warn",
                                 f"Skipped (Xbox 360 package, {pk}): {p.name}")
                 else:
                     self.refuse(p.name, sentence(f"Game Format Converter doesn't convert {p.suffix.lower() or 'this kind of'} files, so it was not added"), "warn",
@@ -10444,6 +11766,9 @@ class App:
         allf, games = [], []
         for dp, dn, fns in os.walk(p):
             dn[:] = [x for x in dn if x.upper() not in ("$RECYCLE.BIN", "SYSTEM VOLUME INFORMATION") and not x.startswith(".chdm_arc_")]
+            if dp.lower().endswith(".data") and is_god_header(dp[:-5]):
+                dn[:] = []                                       # the data files of a Games on Demand package: the header file beside the folder stands for all of it
+                continue
             if any(x.upper() == "PS3_GAME" for x in dn) and ps3_folder_info(Path(dp)) is not None:
                 games.append(Path(dp))                          # a PS3 game folder: taken whole
                 dn[:] = []
@@ -10474,9 +11799,15 @@ class App:
                 if first not in pieces_seen:                # a split image counts once, however many of its pieces are in the folder
                     pieces_seen.add(first)
                     found.append(first)
+            elif e == ".pkg" and stfs_kind(f) is not None:      # an Xbox 360 content file (a game's cache, say), not a PlayStation package: not a game on its own
+                continue
             elif e == ".chd" or e in (".cue", ".gdi", ".toc", ".iso", ".pbp", ".cdi", ".vcd", ".zar", ".mds", ".nrg", ".ccd", ".cso", ".zso", ".ecm",
                                     ".gcm", ".gcz", ".rvz", ".wia", ".wbfs", ".ciso", ".wux", ".wud", ".pkg", ".nsp", ".xci", ".nup",
-                                    ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx", ".cia"):
+                                    ".3ds", ".cci", ".cxi", ".3dsx", ".zcci", ".zcxi", ".z3dsx", ".cia", ".z64", ".v64", ".n64", ".smc", ".sfc", ".pce", ".tg16", ".nds", ".dsi"):
+                found.append(f)
+            elif (e in (".md", ".gen", ".smd") and is_md_rom(f)) or (e in (".swc", ".fig") and is_snes_rom(f)) or (e == ".sgx" and is_pce_rom(f)):   # names shared with other kinds of file: the contents decide
+                found.append(f)
+            elif e == "" and is_god_header(f):                  # a Games on Demand package (its .data folder is beside it)
                 found.append(f)
             elif e == ".bin" and str(f).lower() not in referenced:
                 found.append(f)
@@ -10669,11 +12000,12 @@ class App:
         self.ctx_btn.config(text="Remove the right-click menu" if on else "Add the right-click menu")
         if os.name != "nt":
             self.ctx_label.config(text=(
-                "On. In KDE's Dolphin (the Steam Deck's desktop mode) right-click a disc image or folder and open the 'Game Format Converter' menu. "
-                "In GNOME Files (Nautilus) look under Scripts. Most file managers also list Game Format Converter under 'Open With'. "
+                "On. In KDE's Dolphin (the Steam Deck's desktop mode) and in Xfce's Thunar, right-click a disc image or folder and open the 'Game Format Converter' menu "
+                "(Thunar reads it when it starts: close it with 'thunar -q' once). In Linux Mint's Nemo the entries are 'Convert with...' and 'Add to...'; in GNOME Files "
+                "(Nautilus) and MATE's Caja look under Scripts. Most file managers also list Game Format Converter under 'Open With'. "
                 "Select several files and they all go into one window." if on else
-                "Off. Turn it on to convert disc images from your file manager's right-click menu (Dolphin, GNOME Files). It only "
-                "adds files inside your own ~/.local/share folder, and this button takes them out again."))
+                "Off. Turn it on to convert disc images from your file manager's right-click menu (Dolphin, Thunar, Nemo, GNOME Files, Caja). It only "
+                "adds files inside your own ~/.local/share and ~/.config folders (and, if you use Thunar, a section in its own actions file), and this button takes them out again."))
             return
         self.ctx_label.config(text=(
             "On. Right-click a disc image or a folder and choose 'Convert with Game Format Converter' to convert it at once, 'Convert with "
@@ -10687,13 +12019,15 @@ class App:
             if ctx_menu_installed():
                 ctx_menu_remove()
             else:
-                where = "your own Windows account only" if os.name == "nt" else "files inside your own ~/.local/share folder only"
+                where = "your own Windows account only" if os.name == "nt" else "files inside your own ~/.local/share and ~/.config folders only (and, if you use Thunar, one marked block added to its own actions file; nothing else in that file is changed)"
                 if not messagebox.askyesno(APP_NAME, "Add 'Convert with Game Format Converter' to the right-click menu of disc image files?\n\n"
                                            f"This writes to {where}, and nothing about what opens "
                                            "when you double-click changes. If you move this program's folder, remove the menu "
                                            "and add it again.", parent=self.settings_win):
                     return
                 ctx_menu_install()
+        except LinuxMenuNote as e:
+            messagebox.showwarning(APP_NAME, str(e), parent=self.settings_win)
         except (OSError, ValueError) as e:
             messagebox.showerror(APP_NAME, f"The menu could not be changed: {e}", parent=self.settings_win)
         self.refresh_ctx()
@@ -10717,12 +12051,16 @@ class App:
             finally:
                 c.close()
 
+    def psp_drop_changed(self):
+        PSP_DROP[0] = bool(self.v["psp_drop_update"].get())
+        self.update_action_labels()
+
     def refresh_old_menu(self):
         """A right-click menu added by an earlier version still says 'CHD Manager': rewrite it once so it shows the current name."""
         try:
             if ctx_menu_outdated():
                 ctx_menu_install()
-                self.log(f"The right-click menu now says {APP_NAME}.", "info")
+                self.log("The right-click menu was refreshed (new name or newly supported file types).", "info")
         except Exception:  # noqa: BLE001 - never let a menu problem get in the way of starting
             pass
 
@@ -10899,6 +12237,11 @@ class App:
         """The output file's name: the source's, or built from the game ID and title when Settings, Formats says so."""
         fmt = (o.get("name_format") or "%FILENAME%").strip()
         stem = job.home.name if job.container in ("xfolder", "ps3folder", "psnfolder", "swfolder") else job.split_stem if job.container == "ps3parts" else job.home.stem
+        if job.container == "god":                    # the package's file name is a code: the game's own name (and its disc number, when it has several) is what a person looks for
+            g = job.god
+            stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", g["name"]).strip(" .") or job.home.name
+            if g["discs"] > 1:
+                stem += f" (Disc {max(1, g['disc'])})"
         if fmt == "%FILENAME%":
             return stem
         gid = job.game_id
@@ -10910,13 +12253,17 @@ class App:
             di = job.disc_info
             ent = dict(title=di["title"], main_title=di["title"], main_id=gid,
                        region={"E": "USA", "P": "Europe", "J": "Japan", "K": "Korea"}.get(gid[3:4], ""))
+        if ent is None and job.container in ("n64", "nds") and gid:         # Nintendo 64 / DS: the name and code stored in the ROM's header (the name is short: 20 / 12 characters)
+            h = job.n64_head if job.container == "n64" else job.nds
+            ent = dict(title=h.get("title", ""), main_title=h.get("title", ""), main_id=gid, region=h.get("region", ""))
         vals = {"%FILENAME%": stem, "%GAMEID%": gid, "%TITLE%": ent["title"] if ent else "",
                 "%MAINTITLE%": ent["main_title"] if ent else "", "%MAINGAMEID%": ent["main_id"] if ent else "",
                 "%REGION%": ent["region"] if ent else ""}
         if any(k in fmt and not v for k, v in vals.items()):
             if not job.name_warned:
                 job.name_warned = True
-                why = "no game ID could be read from it" if not gid else "gameInfo.db has no entry for it (Settings, Formats, Get game titles)"
+                why = ("no game ID could be read from it" if not gid else ("this ROM's header has no " + ("title" if not (job.n64_head or job.nds).get("title") else "region")) if job.container in ("n64", "nds")
+                       else "gameInfo.db has no entry for it (Settings, Formats, Get game titles)")
                 self.post("log", f"{job.path.name}: kept the original file name, since {why}.", "warn")
             return stem
         for k, v in vals.items():
@@ -10953,7 +12300,7 @@ class App:
             return []
         raw = job.raw_size()
         ext = job.path.suffix.lower()
-        final = job.size if t == "recompress" else int(raw * SPACE_RATIO.get(t, 1.0))
+        final = job.size if t == "recompress" else job.nds["cap"] if t == "nds_untrim" else int(raw * SPACE_RATIO.get(t, 1.0))
         extra = 0
         if job.container == "disc":
             if t == "wbfs" and job.platform == "Wii" and o["wbfs_scrub"] and not WII_KEYS[0]:
@@ -10966,7 +12313,7 @@ class App:
         else:
             direct = (t == "cue" and job.container in ("pbp", "cdi", "image", "ecm")) or \
                      (t in ("cso", "cso2", "zso") and (job.container == "cso" or (ext == ".iso" and not job.wrap_cue))) or \
-                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso", "z3ds", "unz3ds", "cia", "cci")
+                     (t == "iso" and job.container in ("cso", "zar", "xfolder", "ps3folder", "ps3parts")) or t in ("cue_fix", "art", "zar", "folder", "xiso", "z3ds", "unz3ds", "cia", "cci", "n64_z64", "n64_v64", "n64_n64", "n64_check", "snes_strip", "snes_add", "snes_check", "md_normal", "md_smd", "md_check", "pce_strip", "pce_add", "pce_check", "nds_check", "nds_trim", "nds_untrim", "god_iso")
             if not direct:                                   # through a temporary uncompressed CHD
                 extra = raw + (raw if job.container else 0)
         if o.get("psp_drop_update") and job.platform == "PSP" and ext == ".iso" and t in ("chd", "cso", "cso2", "zso"):
@@ -11013,6 +12360,17 @@ class App:
                 n += 1
         claimed.add(str(out).lower())
         return out
+
+    def clear_of_inputs(self, job, want, tag):
+        """`want`, unless it is one of the files being converted in this run (this item's own source, or another item's, whatever 'If output exists' says):
+        then the same name with ' (tag)' added, so a conversion never replaces a game that is still waiting for its turn."""
+        def key(p):
+            try:
+                return os.path.normcase(str(Path(p).resolve()))
+            except OSError:
+                return os.path.normcase(str(p))
+        taken = {key(p) for j in getattr(self, "jobs", []) + [job] for p in [j.path, *j.src_files]}
+        return want.with_name(f"{want.stem} ({tag}){want.suffix}") if key(want) in taken else want
 
     def handle_exists(self, job, out, o):
         """-> (out, force, skip)"""
@@ -11462,6 +12820,18 @@ class App:
             return self.do_sw_split(job, o)
         if t in ("z3ds", "unz3ds") and job.container == "z3ds":
             return self.do_z3ds(job, o)
+        if t == "god_iso" and job.container == "god":
+            return self.do_god(job, o)
+        if t.startswith("n64_") and job.container == "n64":
+            return self.do_n64(job, o)
+        if t.startswith("snes_") and job.container == "snes":
+            return self.do_snes(job, o)
+        if t.startswith("md_") and job.container == "md":
+            return self.do_md(job, o)
+        if t.startswith("pce_") and job.container == "pce":
+            return self.do_pce(job, o)
+        if t.startswith("nds_") and job.container == "nds":
+            return self.do_nds(job, o)
         if t == "cia" and job.container == "z3ds":
             return self.do_cci_to_cia(job, o)
         if t == "cci" and job.container == "cia3ds":
@@ -11647,6 +13017,370 @@ class App:
         job.out_path, job.out_size = out, out.stat().st_size
         job.status, job.result = "Done", f"→ {out.name}"
         self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)})", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_god(self, job, o):
+        """An Xbox 360 Games on Demand package -> the game disc inside it, as an ISO. Every block is checked against the hashes stored in the package
+        while it is read, the finished image's folders are read to make sure every file is inside it, and nothing is decrypted."""
+        g = job.god
+        want = self.clear_of_inputs(job, self.output_path(job, o, ".iso"), "disc image")
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [Xbox 360 package: {g['name'] or 'unnamed'} → disc image]", "info")
+        try:
+            god_to_iso(g, part, self.cso_progress(job, "Rebuilding the disc image"), stop)
+            count = god_check_iso(part)
+            first = "Every block matched its hash in the package" if any(g["root"]) else \
+                "Every block matched the package's hash tables (the header stores no hash for the first table, so that one table could not be checked)"
+            self.post("log", f"{first}; the disc image's folders read correctly ({count} files).", "ok")
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the package and the new image against each other…", "info")
+                if not god_matches(g, part, self.cso_progress(job, "Verifying"), stop):
+                    job.status, job.result = "Verify failed", "the new image didn't match the package; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.out_size)}; the same game data as the package, rebuilt as a disc image)", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_n64(self, job, o):
+        """A Nintendo 64 ROM -> the same ROM in another byte order (z64, v64 or n64). Only reordered; exact."""
+        if job.target == "n64_check":
+            return self.do_n64_check(job, o)
+        dst_order = job.target.partition("_")[2]
+        src_order = job.n64_order
+        want = self.clear_of_inputs(job, self.output_path(job, o, "." + dst_order), dst_order)      # e.g. a .z64 that holds v64 bytes: never write over the source
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [N64 ROM: {N64_NAMES[src_order]} → {N64_NAMES[dst_order]}]", "info")
+        try:
+            n64_convert(job.path, part, src_order, dst_order, self.cso_progress(job, "Reordering"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                if not n64_matches(job.path, part, src_order, dst_order, self.cso_progress(job, "Verifying"), stop):
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.out_size)}; the same ROM, only the byte order changed)", "ok")
+        if o["verify_after"]:
+            self.n64_checksum_report(job)               # for information only: it never stops or undoes the conversion
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def n64_checksum_report(self, job):
+        """Work out the ROM's header checksums and say in the log whether they match. -> the short result for the row."""
+        try:
+            state, chip = n64_crc_check(job.path, job.n64_order)
+        except OSError as e:
+            self.post("log", f"{job.path.name}: the checksums couldn't be read ({e}).", "warn")
+            return "couldn't be checked"
+        if state == "match":
+            self.post("log", f"{job.path.name}: the header checksums match (boot chip {chip}). That is a good sign the ROM is complete and unchanged.", "ok")
+            return f"checksums match (boot chip {chip})"
+        if state == "short":
+            self.post("log", f"{job.path.name}: too small to check the header checksums (they cover the first megabyte after the boot code).", "info")
+            return "too small to check"
+        self.post("log", f"{job.path.name}: the header checksums DON'T match. The ROM may be damaged, or it may have been modified (hacks and translations often are), "
+                         "or it uses a boot chip type this check hasn't been tried on. The conversion itself is not affected.", "warn")
+        return "checksums don't match (see the log)"
+
+    def do_n64_check(self, job, o):
+        """A Nintendo 64 ROM -> a report on its header checksums. Nothing is written."""
+        self.post("log", f"\n{job.path.name}  [N64 ROM: checking the header checksums]", "info")
+        job.status, job.result = "Done", self.n64_checksum_report(job)
+
+    def snes_checksum_report(self, job):
+        """Check the ROM's own checksum and say so in the log (for information only). -> the short result for the row."""
+        try:
+            state = snes_checksum_check(job.path, job.snes)
+        except OSError as e:
+            self.post("log", f"{job.path.name}: the checksum couldn't be read ({e}).", "warn")
+            return "couldn't be checked"
+        name = job.path.name
+        if state == "match":
+            self.post("log", f"{name}: the ROM's checksum matches its header. That is a good sign the ROM is complete and unchanged.", "ok")
+            return "checksum matches"
+        if state == "unsure":
+            self.post("log", f"{name}: the checksum doesn't match, but this ROM's size isn't a power of two, where the rule for working it out is less certain, "
+                             "so this isn't a reliable sign of a problem.", "info")
+            return "checksum doesn't match (size is unusual; not a sure sign)"
+        self.post("log", f"{name}: the ROM's checksum DOESN'T match its header. The ROM may be damaged, or modified (hacks and translations often are, and many "
+                         "ROMs by small publishers carry a wrong one). The conversion itself is not affected.", "warn")
+        return "checksum doesn't match (see the log)"
+
+    def do_snes(self, job, o):
+        """A Super Nintendo ROM -> the same ROM without its copier header, or with a plain one, or a report on its checksum. Only the 512 header bytes differ."""
+        if job.target == "snes_check":
+            self.post("log", f"\n{job.path.name}  [SNES ROM: checking the checksum]", "info")
+            job.status, job.result = "Done", self.snes_checksum_report(job)
+            return
+        stripping = job.target == "snes_strip"
+        hl = job.snes["header"]
+        want = self.clear_of_inputs(job, self.output_path(job, o, ".sfc" if stripping else ".smc"), "no header" if stripping else "with header")
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [SNES ROM: copier header {'removed' if stripping else 'added'}]", "info")
+        try:
+            if stripping:
+                copy_range(job.path, hl, part, b"", self.cso_progress(job, "Copying"), stop)
+            else:
+                copy_range(job.path, 0, part, snes_new_header(job.size), self.cso_progress(job, "Copying"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                same = same_from(job.path, hl, part, 0, self.cso_progress(job, "Verifying"), stop) if stripping else \
+                    same_from(job.path, 0, part, SNES_HEAD, self.cso_progress(job, "Verifying"), stop)
+                if not same:
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.out_size)}; the game's bytes are unchanged, only the {SNES_HEAD}-byte header {'was taken off' if stripping else 'was put on'})", "ok")
+        if o["verify_after"]:
+            self.snes_checksum_report(job)               # for information only
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def md_checksum_report(self, job):
+        """Check the ROM's own checksum and say so in the log (for information only). -> the short result for the row."""
+        try:
+            state = md_checksum_check(job.path, job.md)
+        except (OSError, ValueError) as e:
+            self.post("log", f"{job.path.name}: the checksum couldn't be worked out ({e}).", "warn")
+            return "couldn't be checked"
+        name = job.path.name
+        if state == "match":
+            self.post("log", f"{name}: the ROM's checksum matches its header. That is a good sign the ROM is complete and unchanged.", "ok")
+            return "checksum matches"
+        if state == "unsure":
+            self.post("log", f"{name}: the header doesn't give a usable ROM end, so the checksum couldn't be checked.", "info")
+            return "couldn't be checked (no usable ROM end in the header)"
+        self.post("log", f"{name}: the ROM's checksum DOESN'T match its header. The ROM may be damaged or modified (hacks and homebrew very often carry a wrong one; "
+                         "the console doesn't check it). The conversion itself is not affected.", "warn")
+        return "checksum doesn't match (see the log)"
+
+    def do_md(self, job, o):
+        """A Mega Drive ROM -> the same ROM in the other layout (normal <-> .smd), or a report on its checksum. Only the 512-byte .smd header differs."""
+        if job.target == "md_check":
+            self.post("log", f"\n{job.path.name}  [Mega Drive ROM: checking the checksum]", "info")
+            job.status, job.result = "Done", self.md_checksum_report(job)
+            return
+        to_smd = job.target == "md_smd"
+        hl = job.md["header"]
+        want = self.clear_of_inputs(job, self.output_path(job, o, ".smd" if to_smd else ".md"), "shuffled" if to_smd else "normal layout")
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [Mega Drive ROM: {'normal → .smd' if to_smd else '.smd → normal'}]", "info")
+        try:
+            md_convert(job.path, part, to_smd, hl, self.cso_progress(job, "Converting"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                same = md_matches(job.path, hl, part, self.cso_progress(job, "Verifying"), stop) if to_smd else \
+                    md_matches(part, 0, job.path, self.cso_progress(job, "Verifying"), stop)
+                if not same:
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.out_size)}; the game's bytes are unchanged, only the layout{' and the 512-byte header' if hl or to_smd else ''} differ)", "ok")
+        if o["verify_after"]:
+            self.md_checksum_report(job)               # for information only
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_nds(self, job, o):
+        """A Nintendo DS / DSi ROM -> the same ROM trimmed to where it ends (the DSi part and any signature kept), or padded with 0xFF to the cartridge's full size, or a report."""
+        n = job.nds
+        if job.target == "nds_check":
+            self.post("log", f"\n{job.path.name}  [DS ROM: looking at the header and the size]", "info")
+            bits = [f"{n['kind']} game" + (f" '{n['title']}'" if n["title"] else ""), f"cartridge {fmt_size(n['cap'])}" if n["cap"] else "cartridge size not stated",
+                    f"the file is {fmt_size(n['size'])}"]
+            if n["short"]:
+                state, level = "the file is SMALLER than the header says the game needs, so it is cut short or damaged", "warn"
+            elif n["trimmed"] is None:
+                state, level = "the header doesn't say where the game ends, so whether it is trimmed can't be told", "info"
+            elif n["size"] == n["trimmed"]:
+                state, level = "it is trimmed to where the game ends" + ((" (its 136-byte Download Play certificate is kept)" if n["cert"] else " (136 extra bytes after the game are kept)") if n["trimmed"] != n["end"] else ""), "ok"
+            elif n["size"] > n["trimmed"]:
+                state, level = f"it has {fmt_size(n['size'] - n['trimmed'])} of room after the game, which can be trimmed", "ok"
+            else:
+                state, level = "its size is below the usual trimmed size", "info"
+            self.post("log", f"{job.path.name}: " + "; ".join(bits) + f"; {state}. The header checksum is {'right' if n['header_ok'] else 'wrong (hacks and translations often leave it)'}.", level)
+            job.status, job.result = "Done", state if level != "warn" else "cut short or damaged (see the log)"
+            return
+        trimming = job.target == "nds_trim"
+        want = self.clear_of_inputs(job, self.output_path(job, o, job.path.suffix.lower()), "trimmed" if trimming else "full size")
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [DS ROM: {'trimming' if trimming else 'padding to full size'}]", "info")
+        try:
+            if trimming:
+                keep = n["trimmed"]
+                if not keep or keep >= n["size"]:
+                    raise UnpackError("there is nothing to trim: the file already ends where the game does")
+                if not nds_tail_is_padding(job.path, keep, stop):
+                    raise UnpackError("what comes after the game isn't just padding (this game keeps data there), so nothing was cut. The file is left alone")
+                nds_copy(job.path, part, keep, 0, self.cso_progress(job, "Trimming"), stop)
+            else:
+                if not n["cap"] or n["size"] >= n["cap"]:
+                    raise UnpackError("this ROM is already full size")
+                nds_copy(job.path, part, n["size"], n["cap"], self.cso_progress(job, "Padding"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                keep_n = n["trimmed"] if trimming else n["size"]
+                same = same_prefix(job.path, part, keep_n, self.cso_progress(job, "Verifying"), stop) and part.stat().st_size == (keep_n if trimming else n["cap"])
+                if same and not trimming:
+                    same = nds_tail_is_padding(part, n["size"], stop)                 # the new part is all 0xFF (what was written)
+                if not same:
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.size)} → {fmt_size(job.out_size)}; the game's own bytes are unchanged)", "ok")
+        if o["delete_src"]:
+            self.remove_sources(job, o)
+
+    def do_pce(self, job, o):
+        """A PC Engine ROM -> the same ROM without its copier header, or with a plain one, or a note on what the file is. Only the 512 header bytes differ."""
+        if job.target == "pce_check":
+            self.post("log", f"\n{job.path.name}  [PC Engine ROM: looking at the file]", "info")
+            p = job.pce
+            self.post("log", f"{job.path.name}: {fmt_size(p['size'] - p['header'])} of ROM ({(p['size'] - p['header']) // PCE_BANK} banks of 8 KB), "
+                             f"{'with a 512-byte copier header' if p['header'] else 'no copier header'}; it starts running at ${p['reset']:04X}. "
+                             "A PC Engine ROM has no checksum, so this only shows the file's structure looks right.", "ok")
+            job.status, job.result = "Done", "structure looks right (a PC Engine ROM has no checksum to check)"
+            return
+        stripping = job.target == "pce_strip"
+        hl = job.pce["header"]
+        want = self.clear_of_inputs(job, self.output_path(job, o, job.path.suffix.lower()), "no header" if stripping else "with header")   # the extension stays the same either way
+        out, _, skip = self.handle_exists(job, want, o)
+        if skip:
+            return
+        part = out.with_name(out.name + ".part")
+        stop = lambda: self.stop_flag  # noqa: E731
+        self.post("log", f"\n{job.path.name}  [PC Engine ROM: copier header {'removed' if stripping else 'added'}]", "info")
+        try:
+            if stripping:
+                copy_range(job.path, hl, part, b"", self.cso_progress(job, "Copying"), stop)
+            else:
+                copy_range(job.path, 0, part, bytes(PCE_HEAD), self.cso_progress(job, "Copying"), stop)
+            if o["verify_after"] or o["delete_src"]:
+                self.post("log", "Reading the new file back against the original…", "info")
+                same = same_from(job.path, hl, part, 0, self.cso_progress(job, "Verifying"), stop) if stripping else \
+                    same_from(job.path, 0, part, PCE_HEAD, self.cso_progress(job, "Verifying"), stop)
+                if not same:
+                    job.status, job.result = "Verify failed", "the new file didn't match the original; it was discarded."
+                    self.post("log", f"{job.path.name}: {job.result}", "err")
+                    return
+            os.replace(part, out)
+        except (UnpackError, ValueError) as e:
+            if self.stop_flag:
+                job.status = "Stopped"
+            else:
+                job.status, job.result = "Failed (can't convert)", str(e)
+                self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        except OSError as e:
+            job.status, job.result = "Failed (disk)", str(e)
+            self.post("log", f"{job.path.name}: {e}", "err")
+            return
+        finally:
+            part.unlink(missing_ok=True)
+        job.out_path, job.out_size = out, out.stat().st_size
+        job.status, job.result = "Done", f"→ {out.name}"
+        self.post("log", f"OK  {out}  ({fmt_size(job.out_size)}; the game's bytes are unchanged, only the {PCE_HEAD}-byte header {'was taken off' if stripping else 'was put on'})", "ok")
         if o["delete_src"]:
             self.remove_sources(job, o)
 
@@ -12016,8 +13750,10 @@ class App:
         exe = find_rpcs3(o.get("rpcs3", ""))
         key = parse_hex_key(o.get("pkg_key", ""))
         if not exe and not key:
-            job.status, job.result = "Failed (setup needed)", ("this needs your own RPCS3 or your own package key: Settings, Formats, PlayStation 3, "
-                                                               "and show it where rpcs3.exe is, or give it your key")
+            job.status, job.result = "Failed (setup needed)", (("this needs your own RPCS3 or your own package key: Settings, Formats, PlayStation 3, "
+                                                                "and show it where rpcs3.exe is, or give it your key") if os.name == "nt" else
+                                                               ("this needs your own package key (RPCS3 can only be used from Windows): "
+                                                                "Settings, Formats, PlayStation 3, and give it your key"))
             self.post("log", f"{job.path.name}: {job.result}", "err")
             return
         only_updates = all(i["patch"] for i in job.pkgs)
@@ -12771,9 +14507,12 @@ class App:
                                         ("" if "header_key" in k else " The header_key line is missing, so they can't be used.")) if k
                                   else "Keys: not set. Games without a ticket convert without them.")
         if hasattr(self, "rpcs3_status"):
-            self.rpcs3_status.config(text=(f"✓ RPCS3 found: {RPCS3[0]}" if RPCS3[0] else "RPCS3: not set yet.") + "   " +
-                                     ("✓ A package key is set." if PKG_KEY[0] else "Package key: not set.") +
-                                     ("" if RPCS3[0] or PKG_KEY[0] else "  Without either, .pkg packages can be added but not unpacked."))
+            if os.name != "nt":
+                self.rpcs3_status.config(text=("✓ A package key is set." if PKG_KEY[0] else "Package key: not set. Without it, .pkg packages can be added but not unpacked."))
+            else:
+                self.rpcs3_status.config(text=(f"✓ RPCS3 found: {RPCS3[0]}" if RPCS3[0] else "RPCS3: not set yet.") + "   " +
+                                         ("✓ A package key is set." if PKG_KEY[0] else "Package key: not set.") +
+                                         ("" if RPCS3[0] or PKG_KEY[0] else "  Without either, .pkg packages can be added but not unpacked."))
         load_wii_keys(self.v["wii_common_key"].get(), self.v["wii_korean_key"].get())
         WII_TOOL[0] = find_dolphintool(self.v["dolphintool"].get().strip())
         WII_SCRUB[0] = bool(self.v["wbfs_scrub"].get())
@@ -12852,16 +14591,18 @@ class App:
             self.wii_status.config(text=self.wii_status_text())
 
         def find_dolphin():
-            p = filedialog.askopenfilename(parent=w, title="Find Dolphin: choose Dolphin.exe (or DolphinTool.exe)",
-                                           filetypes=[("Dolphin", "Dolphin.exe DolphinTool.exe"), ("All programs", "*.exe")])
+            nt = os.name == "nt"
+            p = filedialog.askopenfilename(parent=w, title="Find Dolphin: choose Dolphin.exe (or DolphinTool.exe)" if nt else "Find Dolphin: choose dolphin-tool (or dolphin-emu)",
+                                           filetypes=[("Dolphin", "Dolphin.exe DolphinTool.exe"), ("All programs", "*.exe")] if nt else [("All files", "*")])
             if not p:
                 return
-            p = Path(p)
-            if p.name.lower() == "dolphin.exe":
-                p = p.with_name("DolphinTool.exe")
-            if p.name.lower() != "dolphintool.exe" or not p.is_file():
-                messagebox.showerror(APP_NAME, "That isn't Dolphin, or this Dolphin has no DolphinTool.exe next to it. "
-                                     "Pick Dolphin.exe from the Dolphin folder (a recent Dolphin download).", parent=w)
+            p = dolphin_tool_beside(p)
+            if p is None:
+                messagebox.showerror(APP_NAME, ("That isn't Dolphin, or this Dolphin has no DolphinTool.exe next to it. "
+                                                "Pick Dolphin.exe from the Dolphin folder (a recent Dolphin download).") if nt else
+                                     ("That isn't Dolphin's dolphin-tool, or there is none next to it. Pick the file called dolphin-tool "
+                                      "(Debian and Ubuntu keep it in /usr/games), or dolphin-emu if dolphin-tool is in the same folder. "
+                                      "A Flatpak or AppImage Dolphin can't be used this way; give your own Wii key instead."), parent=w)
                 return
             self.v["dolphintool"].set(str(p))
             self.save_settings()

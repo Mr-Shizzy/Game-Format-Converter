@@ -1327,6 +1327,25 @@ work made the formats understandable.
   maxcso (ISC)                       PSP CSO version 2
   3dbrew (wiki)                      Nintendo 3DS file formats
 
+Version 2.1.1 added the Nintendo 64, Super Nintendo, Mega Drive, PC Engine and
+Nintendo DS ROM tools. They were written from the public descriptions of those file
+layouts (byte orders, copier headers, header fields) and checked against real files.
+For the Nintendo DS trimmer two open-source trimmers were read, and their results were
+compared with this program's on a collection of real ROMs; no source code from either
+is included:
+
+  ndstrim (Nemris, MIT)              Nintendo DS/DSi trimming; its handling of the
+                                     Download Play certificate (136 bytes that start
+                                     with "ac" after a DS game's end) was a reference
+  NDS-Rom-Trimmer (Diego Pino, GPL-3.0+)  an older trimmer that cuts after the last
+                                     non-0xFF byte; read as a comparison only
+
+Version 2.1.1 also reads Xbox 360 Games on Demand packages and writes the disc image
+inside them. This was written from public descriptions of the Xbox 360 package format
+(the Free60 project's notes on STFS) and by examining a real package; no source code
+from any other converter was used or copied. No Microsoft code, keys or
+signatures are included, and nothing is decrypted.
+
 Nothing from Nintendo, Sony, Microsoft or Sega is included: no keys, no certificates,
 no firmware, no BIOS files and no game data. The CIA files this program writes have
 an empty certificate area and unsigned (zeroed) signatures, on purpose.
